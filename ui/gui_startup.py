@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import platform
 import re
@@ -9,7 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     import tkinter as tk
@@ -33,7 +34,11 @@ def _enumerate_cameras_linux() -> List[Tuple[int, str]]:
     devices: List[Tuple[int, str]] = []
     sys_class = Path("/sys/class/video4linux")
     if sys_class.exists():
-        for entry in sorted(sys_class.glob("video*")):
+        def sort_key(path: Path) -> int:
+            match = re.search(r"(\d+)$", path.name)
+            return int(match.group(1)) if match else sys.maxsize
+
+        for entry in sorted(sys_class.glob("video*"), key=sort_key):
             match = re.search(r"(\d+)$", entry.name)
             if not match:
                 continue
@@ -49,7 +54,11 @@ def _enumerate_cameras_linux() -> List[Tuple[int, str]]:
 
     dev_dir = Path("/dev")
     if dev_dir.exists():
-        for entry in sorted(dev_dir.glob("video*")):
+        def dev_sort_key(path: Path) -> int:
+            match = re.search(r"(\d+)$", path.name)
+            return int(match.group(1)) if match else sys.maxsize
+
+        for entry in sorted(dev_dir.glob("video*"), key=dev_sort_key):
             match = re.search(r"(\d+)$", entry.name)
             if not match:
                 continue
@@ -94,6 +103,59 @@ def _enumerate_cameras_macos() -> List[Tuple[int, str]]:
             names.append(str(name))
     return [(i, name) for i, name in enumerate(names)]
 
+def _probe_opencv_indices(max_probes: int) -> List[int]:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return []
+
+    found: List[int] = []
+    for idx in range(max_probes):
+        cap = cv2.VideoCapture(idx)
+        if cap is None:
+            continue
+        try:
+            if cap.isOpened():
+                found.append(idx)
+        finally:
+            cap.release()
+    return found
+
+
+def _merge_with_probed_indices(devices: List[Tuple[int, str]], probed: Iterable[int]) -> List[Tuple[int, str]]:
+    probed_list = list(dict.fromkeys(int(i) for i in probed if isinstance(i, int)))
+    if not probed_list:
+        return devices
+
+    used: set[int] = set()
+    merged: List[Tuple[int, str]] = []
+
+    sequential = all(idx == i for i, (idx, _) in enumerate(devices))
+    assigned_from_sequential = 0
+    if sequential:
+        for actual_idx, (_, name) in zip(probed_list, devices):
+            used.add(actual_idx)
+            merged.append((actual_idx, name))
+            assigned_from_sequential += 1
+
+    remaining_devices = devices[assigned_from_sequential:]
+    remaining_probed = [idx for idx in probed_list if idx not in used]
+
+    fallback_iter = (idx for idx in remaining_probed if idx not in used)
+
+    for idx, name in remaining_devices:
+        assigned = int(idx)
+        if assigned not in probed_list:
+            assigned = next(fallback_iter, assigned)
+        used.add(assigned)
+        merged.append((assigned, name))
+
+    for idx in probed_list:
+        if idx not in used:
+            merged.append((idx, f"Camera {idx}"))
+
+    merged.sort(key=lambda item: item[0])
+    return merged
 
 def enumerate_cameras() -> List[Tuple[int, str]]:
     try:
@@ -110,6 +172,8 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
     else:
         devices = []
 
+    devices = [(int(idx), str(name)) for idx, name in devices]
+
     # Deduplicate while preserving order
     seen = set()
     unique_devices: List[Tuple[int, str]] = []
@@ -119,6 +183,12 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
             continue
         seen.add(key)
         unique_devices.append((idx, name))
+
+    max_probe = max((idx for idx, _ in unique_devices), default=-1)
+    max_probe = max(8, max_probe + 4)
+    probed = _probe_opencv_indices(max_probe)
+    unique_devices = _merge_with_probed_indices(unique_devices, probed)
+
     return unique_devices
 
 
@@ -333,7 +403,7 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
                 if default_label:
                     var.set(default_label)
 
-                cb = ttk.Combobox(row, textvariable=var, values=display, state="readonly")
+                cb = ttk.Combobox(row, textvariable=var, values=display)
                 cb.pack(side="left", fill="x", expand=True)
                 widgets.append(cb)
                 registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type, "choices_map": mapping}
@@ -476,6 +546,10 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
                             sel = var.get()
                             idx = mapping.get(sel)
                             if idx is None:
+                                with contextlib.suppress(ValueError):
+                                    idx = int(sel)
+                            if idx is None:
+
                                 idx = int(spec.default)
                             result[spec.key] = int(idx)
                         else:
