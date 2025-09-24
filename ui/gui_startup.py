@@ -122,7 +122,10 @@ def _probe_opencv_indices(max_probes: int) -> List[int]:
     return found
 
 
-def _merge_with_probed_indices(devices: List[Tuple[int, str]], probed: Iterable[int]) -> List[Tuple[int, str]]:
+def _merge_with_probed_indices(
+    devices: List[Tuple[int, str]],
+    probed: Iterable[int],
+) -> List[Tuple[int, str]]:
     probed_list = list(dict.fromkeys(int(i) for i in probed if isinstance(i, int)))
     if not probed_list:
         return devices
@@ -157,6 +160,7 @@ def _merge_with_probed_indices(devices: List[Tuple[int, str]], probed: Iterable[
     merged.sort(key=lambda item: item[0])
     return merged
 
+  
 def enumerate_cameras() -> List[Tuple[int, str]]:
     try:
         system = platform.system().lower()
@@ -165,12 +169,17 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
 
     if system.startswith("linux"):
         devices = _enumerate_cameras_linux()
+        merge_with_probes = True
     elif system.startswith("windows"):
         devices = _enumerate_cameras_windows()
+        merge_with_probes = False
     elif system.startswith("darwin") or system.startswith("mac"):
         devices = _enumerate_cameras_macos()
+        merge_with_probes = False
     else:
         devices = []
+        merge_with_probes = False
+
 
     devices = [(int(idx), str(name)) for idx, name in devices]
 
@@ -187,8 +196,16 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
     max_probe = max((idx for idx, _ in unique_devices), default=-1)
     max_probe = max(8, max_probe + 4)
     probed = _probe_opencv_indices(max_probe)
-    unique_devices = _merge_with_probed_indices(unique_devices, probed)
-
+    if merge_with_probes:
+        unique_devices = _merge_with_probed_indices(unique_devices, probed)
+    else:
+        existing_indices = {idx for idx, _ in unique_devices}
+        for idx in probed:
+            idx = int(idx)
+            if idx in existing_indices:
+                continue
+            unique_devices.append((idx, f"Camera {idx}"))
+            existing_indices.add(idx)
     return unique_devices
 
 
@@ -549,7 +566,6 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
                                 with contextlib.suppress(ValueError):
                                     idx = int(sel)
                             if idx is None:
-
                                 idx = int(spec.default)
                             result[spec.key] = int(idx)
                         else:
