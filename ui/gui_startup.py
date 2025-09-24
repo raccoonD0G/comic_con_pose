@@ -1,10 +1,16 @@
 ﻿# ui/gui_startup.py
 from __future__ import annotations
 
-import sys
 import argparse
+import contextlib
+import json
+import platform
+import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     import tkinter as tk
@@ -18,10 +24,176 @@ except Exception:
 class FieldSpec:
     key: str
     label: str
-    type: str  # 'str'|'int'|'float'|'bool'|'choice'|'file'
+    type: str  # 'str'|'int'|'float'|'bool'|'choice'|'file'|'camera'
     default: object
     choices: List[object] = field(default_factory=list)
     help: str = ""
+
+
+def _enumerate_cameras_linux() -> List[Tuple[int, str]]:
+    devices: List[Tuple[int, str]] = []
+    sys_class = Path("/sys/class/video4linux")
+    if sys_class.exists():
+        def sort_key(path: Path) -> int:
+            match = re.search(r"(\d+)$", path.name)
+            return int(match.group(1)) if match else sys.maxsize
+
+        for entry in sorted(sys_class.glob("video*"), key=sort_key):
+            match = re.search(r"(\d+)$", entry.name)
+            if not match:
+                continue
+            idx = int(match.group(1))
+            name_path = entry / "name"
+            try:
+                name = name_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                name = entry.name
+            devices.append((idx, name))
+    if devices:
+        return devices
+
+    dev_dir = Path("/dev")
+    if dev_dir.exists():
+        def dev_sort_key(path: Path) -> int:
+            match = re.search(r"(\d+)$", path.name)
+            return int(match.group(1)) if match else sys.maxsize
+
+        for entry in sorted(dev_dir.glob("video*"), key=dev_sort_key):
+            match = re.search(r"(\d+)$", entry.name)
+            if not match:
+                continue
+            idx = int(match.group(1))
+            devices.append((idx, entry.name))
+    return devices
+
+
+def _enumerate_cameras_windows() -> List[Tuple[int, str]]:
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "(Get-CimInstance Win32_PnPEntity) | Where-Object { $_.PNPClass -eq 'Camera' -or $_.Service -eq 'usbvideo' -or $_.ClassGuid -eq '{e5323777-f976-4f5b-9b55-b94699c46e44}' } | Select-Object -ExpandProperty Name",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+
+    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return [(i, name) for i, name in enumerate(names)]
+
+
+def _enumerate_cameras_macos() -> List[Tuple[int, str]]:
+    cmd = ["system_profiler", "SPCameraDataType", "-json"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+
+    cameras = data.get("SPCameraDataType", [])
+    names: List[str] = []
+    for cam in cameras:
+        name = cam.get("_name") or cam.get("spcamera_model_id")
+        if name:
+            names.append(str(name))
+    return [(i, name) for i, name in enumerate(names)]
+
+
+def _probe_opencv_indices(max_probes: int) -> List[int]:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return []
+
+    found: List[int] = []
+    for idx in range(max_probes):
+        cap = cv2.VideoCapture(idx)
+        if cap is None:
+            continue
+        try:
+            if cap.isOpened():
+                found.append(idx)
+        finally:
+            cap.release()
+    return found
+
+
+def _merge_with_probed_indices(devices: List[Tuple[int, str]], probed: Iterable[int]) -> List[Tuple[int, str]]:
+    probed_list = list(dict.fromkeys(int(i) for i in probed if isinstance(i, int)))
+    if not probed_list:
+        return devices
+
+    used: set[int] = set()
+    merged: List[Tuple[int, str]] = []
+
+    sequential = all(idx == i for i, (idx, _) in enumerate(devices))
+    assigned_from_sequential = 0
+    if sequential:
+        for actual_idx, (_, name) in zip(probed_list, devices):
+            used.add(actual_idx)
+            merged.append((actual_idx, name))
+            assigned_from_sequential += 1
+
+    remaining_devices = devices[assigned_from_sequential:]
+    remaining_probed = [idx for idx in probed_list if idx not in used]
+
+    fallback_iter = (idx for idx in remaining_probed if idx not in used)
+
+    for idx, name in remaining_devices:
+        assigned = int(idx)
+        if assigned not in probed_list:
+            assigned = next(fallback_iter, assigned)
+        used.add(assigned)
+        merged.append((assigned, name))
+
+    for idx in probed_list:
+        if idx not in used:
+            merged.append((idx, f"Camera {idx}"))
+
+    merged.sort(key=lambda item: item[0])
+    return merged
+
+
+def enumerate_cameras() -> List[Tuple[int, str]]:
+    try:
+        system = platform.system().lower()
+    except Exception:
+        system = sys.platform.lower()
+
+    if system.startswith("linux"):
+        devices = _enumerate_cameras_linux()
+    elif system.startswith("windows"):
+        devices = _enumerate_cameras_windows()
+    elif system.startswith("darwin") or system.startswith("mac"):
+        devices = _enumerate_cameras_macos()
+    else:
+        devices = []
+
+    devices = [(int(idx), str(name)) for idx, name in devices]
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_devices: List[Tuple[int, str]] = []
+    for idx, name in devices:
+        key = (idx, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_devices.append((idx, name))
+
+    max_probe = max((idx for idx, _ in unique_devices), default=-1)
+    max_probe = max(8, max_probe + 4)
+    probed = _probe_opencv_indices(max_probe)
+    unique_devices = _merge_with_probed_indices(unique_devices, probed)
+    return unique_devices
+
+
+CAMERA_CHOICES: List[Tuple[int, str]] = enumerate_cameras()
 
 
 # 각 탭 상단에 간단한 설명을 보여줍니다.
@@ -47,7 +219,7 @@ FEATURE_HELP: Dict[str, str] = {
 SCHEMA: Dict[str, List[FieldSpec]] = {
     "Source": [
         FieldSpec("src", "Video path (empty=webcam)", "file", "", help="동영상 파일을 선택하거나 비워두면 웹캠을 사용합니다."),
-        FieldSpec("cam", "Camera index", "int", 1),
+        FieldSpec("cam", "Camera device", "camera", 0),
         FieldSpec("backend", "OpenCV backend", "choice", "ds", choices=["ds", "ms", "auto"]),
         FieldSpec("cap_fps", "Capture FPS (0=auto)", "float", 0.0),
         FieldSpec("mjpg", "Use MJPG", "bool", False),
@@ -210,6 +382,40 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
             om.pack(side="left", fill="x", expand=True)
             widgets.append(om)
 
+        elif spec.type == "camera":
+            choices = CAMERA_CHOICES
+            if choices:
+                var = tk.StringVar()
+                display: List[str] = []
+                mapping: Dict[str, int] = {}
+                for idx, name in choices:
+                    label = f"[{idx}] {name}" if name else f"Camera {idx}"
+                    display.append(label)
+                    mapping[label] = idx
+
+                default_idx = int(val) if isinstance(val, int) else int(spec.default)
+                default_label = None
+                for label, idx in mapping.items():
+                    if idx == default_idx:
+                        default_label = label
+                        break
+                if default_label is None and display:
+                    default_label = display[0]
+                if default_label:
+                    var.set(default_label)
+
+                cb = ttk.Combobox(row, textvariable=var, values=display)
+                cb.pack(side="left", fill="x", expand=True)
+                widgets.append(cb)
+                registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type, "choices_map": mapping}
+                return
+
+            # fallback: manual entry
+            var = tk.StringVar(value=str(val))
+            ent = ttk.Entry(row, textvariable=var)
+            ent.pack(side="left", fill="x", expand=True)
+            widgets.append(ent)
+
         elif spec.type == "file":
             var = tk.StringVar(value=str(val))
             ent = ttk.Entry(row, textvariable=var)
@@ -335,6 +541,20 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
                             result[spec.key] = float(val)
                         else:
                             result[spec.key] = val
+                    elif spec.type == "camera":
+                        mapping = info.get("choices_map")
+                        if mapping:
+                            sel = var.get()
+                            idx = mapping.get(sel)
+                            if idx is None:
+                                with contextlib.suppress(ValueError):
+                                    idx = int(sel)
+                            if idx is None:
+                                idx = int(spec.default)
+                            result[spec.key] = int(idx)
+                        else:
+                            s = var.get()
+                            result[spec.key] = int(s) if s != "" else int(spec.default)
                     else:
                         s = var.get()
                         if spec.type == "int":
