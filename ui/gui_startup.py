@@ -103,7 +103,6 @@ def _enumerate_cameras_macos() -> List[Tuple[int, str]]:
             names.append(str(name))
     return [(i, name) for i, name in enumerate(names)]
 
-
 def _probe_opencv_indices(max_probes: int) -> List[int]:
     try:
         import cv2  # type: ignore
@@ -161,7 +160,7 @@ def _merge_with_probed_indices(
     merged.sort(key=lambda item: item[0])
     return merged
 
-
+  
 def enumerate_cameras() -> List[Tuple[int, str]]:
     try:
         system = platform.system().lower()
@@ -180,6 +179,7 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
     else:
         devices = []
         merge_with_probes = False
+
 
     devices = [(int(idx), str(name)) for idx, name in devices]
 
