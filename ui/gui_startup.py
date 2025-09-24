@@ -66,21 +66,299 @@ def _enumerate_cameras_linux() -> List[Tuple[int, str]]:
             devices.append((idx, entry.name))
     return devices
 
+  
+def _extract_windows_pnp_id(display_name: str) -> str | None:
+    prefix = "@device:pnp:"
+    if not display_name.lower().startswith(prefix):
+        return None
 
-def _enumerate_cameras_windows() -> List[Tuple[int, str]]:
+    remainder = display_name[len(prefix):]
+    remainder = remainder.split("#{", 1)[0]
+    remainder = remainder.rstrip("\\")
+    if remainder.startswith("\\\\?\\"):
+        remainder = remainder[4:]
+    remainder = remainder.replace("#", "\\")
+    remainder = remainder.replace("\\\\", "\\")
+    remainder = remainder.strip("\\")
+    if not remainder:
+        return None
+    return remainder.upper()
+
+
+def _win32_directshow_display_names() -> List[str]:
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    HRESULT = ctypes.c_long
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+        def __init__(self, value: str):  # type: ignore[override]
+            super().__init__()
+            value = value.strip("{}")
+            parts = value.split("-")
+            if len(parts) != 5:
+                raise ValueError(f"Invalid GUID string: {value}")
+            self.Data1 = int(parts[0], 16)
+            self.Data2 = int(parts[1], 16)
+            self.Data3 = int(parts[2], 16)
+            data4 = bytes.fromhex(parts[3] + parts[4])
+            for i in range(8):
+                self.Data4[i] = data4[i]
+
+    CLSID_SystemDeviceEnum = GUID("{62BE5D10-60EB-11d0-BD3B-00A0C911CE86}")
+    CLSID_VideoInputDeviceCategory = GUID("{860BB310-5D01-11d0-BD3B-00A0C911CE86}")
+    IID_ICreateDevEnum = GUID("{29840822-5B84-11D0-BD3B-00A0C911CE86}")
+
+    class ICreateDevEnum(ctypes.Structure):
+        pass
+
+    class IEnumMoniker(ctypes.Structure):
+        pass
+
+    class IMoniker(ctypes.Structure):
+        pass
+
+    class ICreateDevEnumVtbl(ctypes.Structure):
+        _fields_ = [
+            ("QueryInterface", ctypes.c_void_p),
+            ("AddRef", ctypes.c_void_p),
+            ("Release", ctypes.c_void_p),
+            ("CreateClassEnumerator", ctypes.c_void_p),
+        ]
+
+    class IEnumMonikerVtbl(ctypes.Structure):
+        _fields_ = [
+            ("QueryInterface", ctypes.c_void_p),
+            ("AddRef", ctypes.c_void_p),
+            ("Release", ctypes.c_void_p),
+            ("Next", ctypes.c_void_p),
+            ("Skip", ctypes.c_void_p),
+            ("Reset", ctypes.c_void_p),
+            ("Clone", ctypes.c_void_p),
+        ]
+
+    class IMonikerVtbl(ctypes.Structure):
+        _fields_ = [
+            ("QueryInterface", ctypes.c_void_p),
+            ("AddRef", ctypes.c_void_p),
+            ("Release", ctypes.c_void_p),
+            ("GetClassID", ctypes.c_void_p),
+            ("IsDirty", ctypes.c_void_p),
+            ("Load", ctypes.c_void_p),
+            ("Save", ctypes.c_void_p),
+            ("GetSizeMax", ctypes.c_void_p),
+            ("BindToObject", ctypes.c_void_p),
+            ("BindToStorage", ctypes.c_void_p),
+            ("Reduce", ctypes.c_void_p),
+            ("ComposeWith", ctypes.c_void_p),
+            ("Enum", ctypes.c_void_p),
+            ("IsEqual", ctypes.c_void_p),
+            ("Hash", ctypes.c_void_p),
+            ("IsRunning", ctypes.c_void_p),
+            ("GetTimeOfLastChange", ctypes.c_void_p),
+            ("Inverse", ctypes.c_void_p),
+            ("CommonPrefixWith", ctypes.c_void_p),
+            ("RelativePathTo", ctypes.c_void_p),
+            ("GetDisplayName", ctypes.c_void_p),
+            ("ParseDisplayName", ctypes.c_void_p),
+            ("IsSystemMoniker", ctypes.c_void_p),
+        ]
+
+    ICreateDevEnum._fields_ = [("lpVtbl", ctypes.POINTER(ICreateDevEnumVtbl))]
+    IEnumMoniker._fields_ = [("lpVtbl", ctypes.POINTER(IEnumMonikerVtbl))]
+    IMoniker._fields_ = [("lpVtbl", ctypes.POINTER(IMonikerVtbl))]
+
+    ole32 = ctypes.OleDLL("ole32")
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole32.CoInitializeEx.restype = HRESULT
+    ole32.CoUninitialize.argtypes = []
+    ole32.CoUninitialize.restype = None
+    ole32.CoCreateInstance.argtypes = [
+        ctypes.POINTER(GUID),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(GUID),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    ole32.CoCreateInstance.restype = HRESULT
+    ole32.CreateBindCtx.argtypes = [wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    ole32.CreateBindCtx.restype = HRESULT
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+
+    COINIT_APARTMENTTHREADED = 0x2
+    CLSCTX_INPROC_SERVER = 0x1
+
+    init_hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    initialized = init_hr in (0, 1)
+    if init_hr < 0:
+        return []
+
+    devices: List[str] = []
+    create_dev_enum = ctypes.POINTER(ICreateDevEnum)()
+    try:
+        dev_enum_void = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(CLSID_SystemDeviceEnum),
+            None,
+            CLSCTX_INPROC_SERVER,
+            ctypes.byref(IID_ICreateDevEnum),
+            ctypes.byref(dev_enum_void),
+        )
+        if hr < 0:
+            return []
+
+        create_dev_enum = ctypes.cast(dev_enum_void, ctypes.POINTER(ICreateDevEnum))
+        create_enum_fn = ctypes.WINFUNCTYPE(
+            HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(GUID),
+            ctypes.POINTER(ctypes.POINTER(IEnumMoniker)),
+            wintypes.DWORD,
+        )(create_dev_enum.contents.lpVtbl.contents.CreateClassEnumerator)
+
+        enum_moniker = ctypes.POINTER(IEnumMoniker)()
+        hr = create_enum_fn(create_dev_enum, ctypes.byref(CLSID_VideoInputDeviceCategory), ctypes.byref(enum_moniker), 0)
+        if hr != 0:
+            return []
+
+        try:
+            release_enum = None
+            next_fn = ctypes.WINFUNCTYPE(
+                HRESULT,
+                ctypes.c_void_p,
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.POINTER(IMoniker)),
+                ctypes.POINTER(ctypes.c_ulong),
+            )(enum_moniker.contents.lpVtbl.contents.Next)
+            release_enum = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(enum_moniker.contents.lpVtbl.contents.Release)
+
+            bind_ctx = ctypes.c_void_p()
+            hr = ole32.CreateBindCtx(0, ctypes.byref(bind_ctx))
+            if hr < 0:
+                return []
+
+            try:
+                release_bind = None
+                if bind_ctx:
+                    vtbl = ctypes.cast(bind_ctx, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
+                    release_bind = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl.contents[2])
+
+                get_display = None
+                release_moniker = None
+
+                while True:
+                    fetched = ctypes.c_ulong()
+                    moniker = ctypes.POINTER(IMoniker)()
+                    hr = next_fn(enum_moniker, 1, ctypes.byref(moniker), ctypes.byref(fetched))
+                    if hr != 0 or fetched.value == 0:
+                        break
+
+                    try:
+                        vtbl = moniker.contents.lpVtbl.contents
+                        if get_display is None:
+                            get_display = ctypes.WINFUNCTYPE(
+                                HRESULT,
+                                ctypes.c_void_p,
+                                ctypes.c_void_p,
+                                ctypes.c_void_p,
+                                ctypes.POINTER(ctypes.c_void_p),
+                            )(vtbl.GetDisplayName)
+                        if release_moniker is None:
+                            release_moniker = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl.Release)
+
+                        name_ptr = ctypes.c_void_p()
+                        hr = get_display(moniker, bind_ctx, None, ctypes.byref(name_ptr))
+                        if hr == 0 and name_ptr.value:
+                            try:
+                                devices.append(ctypes.wstring_at(name_ptr.value))
+                            finally:
+                                ole32.CoTaskMemFree(name_ptr)
+                    finally:
+                        if release_moniker is not None and moniker:
+                            release_moniker(moniker)
+
+                if release_bind is not None and bind_ctx:
+                    release_bind(bind_ctx)
+            finally:
+                if enum_moniker and release_enum is not None:
+                    release_enum(enum_moniker)
+        finally:
+            if create_dev_enum:
+                release_create = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(create_dev_enum.contents.lpVtbl.contents.Release)
+                release_create(create_dev_enum)
+    finally:
+        if initialized:
+            ole32.CoUninitialize()
+
+    return devices
+
+
+def _windows_pnp_name_map() -> Dict[str, str]:
     cmd = [
         "powershell",
         "-NoProfile",
         "-Command",
-        "(Get-CimInstance Win32_PnPEntity) | Where-Object { $_.PNPClass -eq 'Camera' -or $_.Service -eq 'usbvideo' -or $_.ClassGuid -eq '{e5323777-f976-4f5b-9b55-b94699c46e44}' } | Select-Object -ExpandProperty Name",
+        "(Get-CimInstance Win32_PnPEntity) | Where-Object { $_.PNPClass -eq 'Camera' -or $_.Service -eq 'usbvideo' -or $_.ClassGuid -eq '{e5323777-f976-4f5b-9b55-b94699c46e44}' } | Select-Object Name, PNPDeviceID | ConvertTo-Json -Compress",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
     except (FileNotFoundError, subprocess.SubprocessError):
-        return []
+        return {}
 
-    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    return [(i, name) for i, name in enumerate(names)]
+    output = proc.stdout.strip()
+    if not output:
+        return {}
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return {}
+
+    mapping: Dict[str, str] = {}
+    entries = data if isinstance(data, list) else [data]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("Name")
+        pnp_id = entry.get("PNPDeviceID")
+        if not name or not pnp_id:
+            continue
+        mapping[str(pnp_id).upper()] = str(name)
+    return mapping
+
+
+def _enumerate_cameras_windows() -> List[Tuple[int, str]]:
+    display_names = _win32_directshow_display_names()
+    pnp_map = _windows_pnp_name_map()
+
+    devices: List[Tuple[int, str]] = []
+    for idx, display_name in enumerate(display_names):
+        pnp_id = _extract_windows_pnp_id(display_name)
+        friendly = pnp_map.get(pnp_id or "") if pnp_id else None
+        if not friendly:
+            friendly = pnp_map.get(display_name.upper())
+        if not friendly:
+            friendly = display_name
+        devices.append((idx, friendly))
+
+    if devices:
+        return devices
+
+    if pnp_map:
+        return [(i, name) for i, name in enumerate(pnp_map.values())]
+
+    return []
 
 
 def _enumerate_cameras_macos() -> List[Tuple[int, str]]:
@@ -102,6 +380,7 @@ def _enumerate_cameras_macos() -> List[Tuple[int, str]]:
         if name:
             names.append(str(name))
     return [(i, name) for i, name in enumerate(names)]
+
 
 def _probe_opencv_indices(max_probes: int) -> List[int]:
     try:
@@ -160,7 +439,7 @@ def _merge_with_probed_indices(
     merged.sort(key=lambda item: item[0])
     return merged
 
-  
+
 def enumerate_cameras() -> List[Tuple[int, str]]:
     try:
         system = platform.system().lower()
