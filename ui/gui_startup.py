@@ -66,7 +66,7 @@ def _enumerate_cameras_linux() -> List[Tuple[int, str]]:
             devices.append((idx, entry.name))
     return devices
 
-
+  
 def _extract_windows_pnp_id(display_name: str) -> str | None:
     prefix = "@device:pnp:"
     if not display_name.lower().startswith(prefix):
@@ -458,6 +458,7 @@ def enumerate_cameras() -> List[Tuple[int, str]]:
     else:
         devices = []
         merge_with_probes = False
+
 
     devices = [(int(idx), str(name)) for idx, name in devices]
 
