@@ -321,20 +321,38 @@ def prepare_coordinates_and_hands(ctx: RunContext, M, xy_use_src, conf_use, hand
     return xy_send, conf_send, hands_send
 
 
-def mirror_if_needed(ctx: RunContext, frame_rgba, xy_send, hands_send, bbox_canvas):
+def apply_output_flips_if_needed(ctx: RunContext, frame_rgba, xy_send, hands_send, bbox_canvas):
     cv2 = lazy.cv2
-    if not ctx.args.mirror:
+    flip_h = bool(getattr(ctx.args, "horizontal_flip", False))
+    flip_v = bool(getattr(ctx.args, "flip_vertical", False))
+    if not (flip_h or flip_v):
         return frame_rgba, xy_send, hands_send, bbox_canvas
-    frame_rgba = cv2.flip(frame_rgba, 1)
+    if flip_h and flip_v:
+        flip_code = -1
+    elif flip_h:
+        flip_code = 1
+    else:
+        flip_code = 0
+    frame_rgba = cv2.flip(frame_rgba, flip_code)
     if xy_send is not None:
-        xy_send[..., 0] = (ctx.OUT_W - 1) - xy_send[..., 0]
+        if flip_h:
+            xy_send[..., 0] = (ctx.OUT_W - 1) - xy_send[..., 0]
+        if flip_v:
+            xy_send[..., 1] = (ctx.OUT_H - 1) - xy_send[..., 1]
     for hand in hands_send:
-        hand["xy"][..., 0] = (ctx.OUT_W - 1) - hand["xy"][..., 0]
-        if hand.get("handed") in (0, 1):
-            hand["handed"] = 1 - int(hand["handed"])
+        if flip_h:
+            hand["xy"][..., 0] = (ctx.OUT_W - 1) - hand["xy"][..., 0]
+            if hand.get("handed") in (0, 1):
+                hand["handed"] = 1 - int(hand["handed"])
+        if flip_v:
+            hand["xy"][..., 1] = (ctx.OUT_H - 1) - hand["xy"][..., 1]
     if bbox_canvas is not None:
         x1, y1, x2, y2 = bbox_canvas
-        bbox_canvas = lazy.np.array([(ctx.OUT_W - 1) - x2, y1, (ctx.OUT_W - 1) - x1, y2], lazy.np.float32)
+        if flip_h:
+            x1, x2 = (ctx.OUT_W - 1) - x2, (ctx.OUT_W - 1) - x1
+        if flip_v:
+            y1, y2 = (ctx.OUT_H - 1) - y2, (ctx.OUT_H - 1) - y1
+        bbox_canvas = lazy.np.array([x1, y1, x2, y2], lazy.np.float32)
     return frame_rgba, xy_send, hands_send, bbox_canvas
 
 
