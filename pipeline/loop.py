@@ -24,7 +24,16 @@ from .frame_ops import (
     run_rvm_on_roi_or_full,
     show_preview,
 )
-from .setup import build_models, build_sender_or_exit, init_ndi_or_exit, open_capture, prepare_grading, prepare_preview, probe_source_size_or_exit
+from .setup import (
+    build_models,
+    build_sender_or_exit,
+    init_ndi_or_exit,
+    open_capture,
+    prepare_grading,
+    prepare_preview,
+    probe_source_size_or_exit,
+    warmup_cuda_kernels,
+)
 
 
 def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
@@ -44,6 +53,7 @@ def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event
     center = lazy.CenterTracker(out_w, out_h, args.center_smooth, args.center_deadzone)
 
     device, pose, rvm, hands = build_models(args)
+    warmup_cuda_kernels(args, device, pose, rvm, cam_w, cam_h)
     sender = build_sender_or_exit(args, out_w, out_h)
     prepare_preview(args, out_w, out_h)
 
