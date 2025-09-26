@@ -25,6 +25,7 @@ def rotate_if_needed(frame_bgr, rot: int):
 def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
     np = lazy.np
     pose_worker = getattr(ctx, "pose_worker", None)
+    pose_updated = False
 
     if pose_worker is not None:
         if (caches.frames % max(1, ctx.args.pose_every)) == 0:
@@ -37,6 +38,7 @@ def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
                 caches.last_pose_result_id = pose_id
                 caches.last_xy_all_src = xy_all_src
                 caches.last_conf_all = conf_all
+                pose_updated = True
 
         xy_all_src = caches.last_xy_all_src
         conf_all = caches.last_conf_all
@@ -47,6 +49,10 @@ def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
             if xy_all_src is not None:
                 caches.last_xy_all_src = xy_all_src
                 caches.last_conf_all = conf_all
+            else:
+                caches.last_xy_all_src = None
+                caches.last_conf_all = None
+            pose_updated = True
         else:
             xy_all_src = caches.last_xy_all_src
             conf_all = caches.last_conf_all
@@ -79,7 +85,7 @@ def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
     else:
         bbox_src_debug = caches.last_bbox_src_debug
 
-    return xy_use_src, conf_use, bbox_src_debug
+    return xy_use_src, conf_use, bbox_src_debug, pose_updated
 
 
 def run_hands_every(ctx: RunContext, caches: Caches, frame_bgr, bbox_src_debug: Optional[Tuple[int, int, int, int]]):

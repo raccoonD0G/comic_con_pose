@@ -138,7 +138,7 @@ def run_loop(ctx: RunContext) -> None:
 
             caches.frames += 1
 
-            xy_use_src, conf_use, bbox_src_debug = run_pose_every(ctx, caches, frame_bgr)
+            xy_use_src, conf_use, bbox_src_debug, pose_updated = run_pose_every(ctx, caches, frame_bgr)
             prof.mark("pose")
 
             hands_src = run_hands_every(ctx, caches, frame_bgr, bbox_src_debug)
@@ -171,7 +171,8 @@ def run_loop(ctx: RunContext) -> None:
             prof.mark("flip")
 
             frame_to_send = frame_rgba if frame_rgba.flags["C_CONTIGUOUS"] else np.ascontiguousarray(frame_rgba)
-            ctx.udp.send(xy_send, conf_send, hands_send)
+            if pose_updated:
+                ctx.udp.send(xy_send, conf_send, hands_send)
             ctx.sender.send_rgba(frame_to_send)
             prof.mark("io")
 
