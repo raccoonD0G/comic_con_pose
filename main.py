@@ -20,9 +20,10 @@ import socket
 import struct
 import sys
 import threading
+import traceback
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
@@ -100,6 +101,12 @@ from utils import (
     fourcc_to_str, kps_to_bbox, make_letterbox_affine, apply_affine_xy,
     bbox_apply_affine, person_center, clip_int,
     draw_pose, draw_hands, make_bbox_mask, warp_mask_to_canvas, cutout_alpha_inplace, padded_bbox_src, ema_rect, crop_safe, padded_bbox_src
+)
+from ui.gui_startup import (
+    SettingsForm,
+    defaults_from_schema,
+    get_args_with_gui_fallback,
+    namespace_from_dict,
 )
 
 # =========================
@@ -185,7 +192,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--roi-pad-y", type=float, default=0.15, help="Hands ROI pad ratio Y")
 
     # 핵심: GUI fallback 호출
-    from ui.gui_startup import get_args_with_gui_fallback
     return get_args_with_gui_fallback(ap)
 
 # =========================
@@ -214,6 +220,7 @@ class RunContext:
     # grading
     stats: Optional[Dict]
     lut_gamma_dark: Optional[np.ndarray]
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 @dataclass
 class Caches:
@@ -314,7 +321,7 @@ def prepare_grading(args: argparse.Namespace, OUT_W: int, OUT_H: int) -> Tuple[O
     lut = build_gamma_dark_lut(stats["gamma"], stats["dark"])
     return stats, lut
 
-def build_context(args: argparse.Namespace) -> RunContext:
+def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
     W, H = args.w, args.h
     KP_THR = float(np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or ONLY_NEAREST
@@ -337,7 +344,8 @@ def build_context(args: argparse.Namespace) -> RunContext:
     return RunContext(
         args=args, OUT_W=OUT_W, OUT_H=OUT_H, KP_THR=KP_THR, use_nearest=use_nearest,
         cap=cap, cam_mgr=cam_mgr, center=center, device=device, pose=pose, rvm=rvm,
-        hands=hands, sender=sender, udp=udp, stats=stats, lut_gamma_dark=lut
+        hands=hands, sender=sender, udp=udp, stats=stats, lut_gamma_dark=lut,
+        stop_event=stop_event or threading.Event()
     )
 
 # =========================
@@ -627,11 +635,16 @@ def run_loop(ctx: RunContext) -> None:
 
     print("[INFO] Running... (ESC to quit)")
     try:
-        while True:
+        while not ctx.stop_event.is_set():
             prof.tick()  # 프레임 시작
+
+            if ctx.stop_event.is_set():
+                break
 
             frame_bgr = ctx.cam_mgr.read()
             if frame_bgr is None:
+                if ctx.stop_event.is_set():
+                    break
                 if not ctx.args.no_preview:
                     if (cv2.waitKey(1) & 0xFF) == 27:
                         break
@@ -704,6 +717,9 @@ def run_loop(ctx: RunContext) -> None:
             prof.mark("io")
 
             # 10) Preview
+            if ctx.stop_event.is_set():
+                break
+
             if show_preview(ctx, frame_rgba, xy_send, conf_send, bbox_canvas):
                 break
             prof.mark("preview")
@@ -718,6 +734,7 @@ def run_loop(ctx: RunContext) -> None:
 
 
 def cleanup(ctx: RunContext) -> None:
+    ctx.stop_event.set()
     ctx.cam_mgr.stop()
     ctx.cap.release()
     if not ctx.args.no_preview:
@@ -727,14 +744,225 @@ def cleanup(ctx: RunContext) -> None:
     ctx.hands.close()
     print("[INFO] Finished.")
 
+
+class PipelineRunner:
+    """Background thread runner for the capture/render pipeline."""
+
+    def __init__(self, app: "ControlPanelApp") -> None:
+        self.app = app
+        self.thread: Optional[threading.Thread] = None
+        self.ctx: Optional[RunContext] = None
+        self.stop_event: Optional[threading.Event] = None
+        self._lock = threading.Lock()
+
+    def start(self, args: argparse.Namespace) -> None:
+        with self._lock:
+            if self.thread and self.thread.is_alive():
+                raise RuntimeError("Pipeline already running")
+            stop_event = threading.Event()
+            self.stop_event = stop_event
+
+            def worker() -> None:
+                ctx: Optional[RunContext] = None
+                try:
+                    ctx = build_context(args, stop_event=stop_event)
+                    with self._lock:
+                        self.ctx = ctx
+                    self.app.on_pipeline_running_threadsafe()
+                    run_loop(ctx)
+                except Exception as exc:  # pragma: no cover - runtime failure path
+                    self.app.on_pipeline_error_threadsafe(exc)
+                finally:
+                    if ctx is not None:
+                        try:
+                            cleanup(ctx)
+                        except Exception as exc:  # pragma: no cover - cleanup failure
+                            print("[ERROR] Cleanup failed:", exc, file=sys.stderr)
+                    self.app.on_pipeline_finished_threadsafe()
+                    with self._lock:
+                        self.thread = None
+                        self.ctx = None
+                        self.stop_event = None
+
+            thread = threading.Thread(target=worker, name="pipeline-thread", daemon=True)
+            self.thread = thread
+
+        thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            event = self.stop_event
+            ctx = self.ctx
+        if event:
+            event.set()
+        if ctx:
+            ctx.cam_mgr.stop()
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self.thread and self.thread.is_alive())
+
+
+class ControlPanelApp:
+    def __init__(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, ttk
+        except Exception as exc:  # pragma: no cover - environment without Tk
+            raise RuntimeError("Tkinter GUI is not available") from exc
+
+        self.messagebox = messagebox
+
+        self.root = tk.Tk()
+        self.root.title("WebcamCutout — Controller")
+        self.root.geometry("960x760")
+
+        defaults = defaults_from_schema()
+        self.form = SettingsForm(self.root, defaults)
+        self.form.focus_first()
+
+        controls = ttk.Frame(self.root)
+        controls.pack(fill="x", padx=8, pady=8)
+
+        self.status_var = tk.StringVar(value="Idle")
+        ttk.Label(controls, textvariable=self.status_var).pack(side="left")
+
+        self.stop_btn = ttk.Button(controls, text="Stop", command=self.on_stop, state="disabled")
+        self.stop_btn.pack(side="right")
+        self.start_btn = ttk.Button(controls, text="Start", command=self.on_start)
+        self.start_btn.pack(side="right", padx=6)
+
+        self.runner = PipelineRunner(self)
+        self._requested_stop = False
+        self._error_reported = False
+        self._closing = False
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    # ------------------------------------------------------------------
+    # UI callbacks
+    # ------------------------------------------------------------------
+    def on_start(self) -> None:
+        if self.runner.is_running():
+            self.messagebox.showinfo("Info", "Pipeline is already running.")
+            return
+        try:
+            values = self.form.collect_values()
+        except Exception as exc:
+            self.messagebox.showerror("Invalid input", str(exc))
+            return
+
+        args = namespace_from_dict(values)
+
+        self._requested_stop = False
+        self._error_reported = False
+        self.form.set_running(True)
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.queue_status("Initializing…")
+        try:
+            self.runner.start(args)
+        except RuntimeError as exc:
+            self._error_reported = True
+            self.queue_status("Error")
+            self.messagebox.showerror("Error", str(exc))
+            self._reset_controls()
+
+    def on_stop(self) -> None:
+        if not self.runner.is_running():
+            return
+        self._requested_stop = True
+        self.queue_status("Stopping…")
+        self.stop_btn.configure(state="disabled")
+        self.runner.stop()
+
+    def on_close(self) -> None:
+        if self.runner.is_running():
+            self._closing = True
+            if not self._requested_stop:
+                self.on_stop()
+            self.root.after(200, self._wait_close)
+            return
+        self.root.destroy()
+
+    def _wait_close(self) -> None:
+        if self.runner.is_running():
+            self.root.after(200, self._wait_close)
+        else:
+            self.root.destroy()
+
+    # ------------------------------------------------------------------
+    # Thread-safe notifications from PipelineRunner
+    # ------------------------------------------------------------------
+    def queue_status(self, text: str) -> None:
+        self.root.after(0, lambda: self.status_var.set(text))
+
+    def on_pipeline_running_threadsafe(self) -> None:
+        self.root.after(0, lambda: self.queue_status("Running"))
+
+    def on_pipeline_error_threadsafe(self, exc: Exception) -> None:
+        tb = ''.join(traceback.format_exception(exc.__class__, exc, exc.__traceback__))
+
+        def show_error() -> None:
+            self._error_reported = True
+            self.queue_status("Error")
+            print(tb, file=sys.stderr)
+            self.messagebox.showerror("Pipeline error", str(exc))
+
+        self.root.after(0, show_error)
+
+    def on_pipeline_finished_threadsafe(self) -> None:
+        self.root.after(0, self._on_pipeline_finished)
+
+    def _on_pipeline_finished(self) -> None:
+        self._reset_controls()
+        if self._error_reported:
+            pass
+        elif self._requested_stop:
+            self.queue_status("Stopped")
+        else:
+            self.queue_status("Idle")
+        self._requested_stop = False
+        if self._closing:
+            self.root.after(50, self.root.destroy)
+
+    def _reset_controls(self) -> None:
+        self.form.set_running(False)
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+
+
 # =========================
 # Public entry
 # =========================
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    stop_event = threading.Event()
+    ctx = build_context(args, stop_event=stop_event)
+    try:
+        run_loop(ctx)
+    finally:
+        cleanup(ctx)
+
+
 def main() -> None:
-    args = parse_args()
-    ctx = build_context(args)
-    run_loop(ctx)
-    cleanup(ctx)
+    if len(sys.argv) > 1:
+        args = parse_args()
+        run_pipeline(args)
+        return
+
+    try:
+        app = ControlPanelApp()
+    except RuntimeError as exc:
+        print(f"[WARN] {exc}. Falling back to CLI mode.", file=sys.stderr)
+        args = parse_args()
+        run_pipeline(args)
+        return
+
+    app.run()
 
 
 if __name__ == "__main__":
