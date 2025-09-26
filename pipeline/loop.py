@@ -24,6 +24,7 @@ from .frame_ops import (
     run_rvm_on_roi_or_full,
     show_preview,
 )
+from .pose_async import PoseWorker
 from .setup import (
     build_models,
     build_sender_or_exit,
@@ -54,6 +55,8 @@ def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event
 
     device, pose, rvm, hands = build_models(args)
     warmup_cuda_kernels(args, device, pose, rvm, cam_w, cam_h)
+    pose_worker = PoseWorker(pose, scale=float(args.pose_scale))
+    pose_worker.start()
     sender = build_sender_or_exit(args, out_w, out_h)
     prepare_preview(args, out_w, out_h)
 
@@ -77,6 +80,7 @@ def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event
         hands=hands,
         sender=sender,
         udp=udp,
+        pose_worker=pose_worker,
         stats=stats,
         lut_gamma_dark=lut,
         stop_event=stop_event or threading.Event(),
@@ -165,6 +169,8 @@ def cleanup(ctx: RunContext) -> None:
     ctx.sender.close()
     lazy.ndi.destroy()
     ctx.hands.close()
+    if getattr(ctx, "pose_worker", None) is not None:
+        ctx.pose_worker.stop()
     print("[INFO] Finished.")
 
 
