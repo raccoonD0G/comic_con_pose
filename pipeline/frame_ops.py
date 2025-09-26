@@ -24,15 +24,32 @@ def rotate_if_needed(frame_bgr, rot: int):
 
 def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
     np = lazy.np
-    xy_all_src = conf_all = None
-    if (caches.frames % max(1, ctx.args.pose_every)) == 0:
-        xy_all_src, conf_all = ctx.pose.predict_downscaled(frame_bgr, scale=float(ctx.args.pose_scale))
-        if xy_all_src is not None:
-            caches.last_xy_all_src = xy_all_src
-            caches.last_conf_all = conf_all
-    else:
+    pose_worker = getattr(ctx, "pose_worker", None)
+
+    if pose_worker is not None:
+        if (caches.frames % max(1, ctx.args.pose_every)) == 0:
+            pose_worker.submit(frame_bgr)
+
+        latest = pose_worker.latest()
+        if latest is not None:
+            pose_id, xy_all_src, conf_all = latest
+            if pose_id != caches.last_pose_result_id:
+                caches.last_pose_result_id = pose_id
+                caches.last_xy_all_src = xy_all_src
+                caches.last_conf_all = conf_all
+
         xy_all_src = caches.last_xy_all_src
         conf_all = caches.last_conf_all
+    else:
+        xy_all_src = conf_all = None
+        if (caches.frames % max(1, ctx.args.pose_every)) == 0:
+            xy_all_src, conf_all = ctx.pose.predict_downscaled(frame_bgr, scale=float(ctx.args.pose_scale))
+            if xy_all_src is not None:
+                caches.last_xy_all_src = xy_all_src
+                caches.last_conf_all = conf_all
+        else:
+            xy_all_src = caches.last_xy_all_src
+            conf_all = caches.last_conf_all
 
     bbox_src_debug = None
     if xy_all_src is not None:
@@ -85,8 +102,13 @@ def run_matting_every(ctx: RunContext, caches: Caches, frame_bgr):
     if not (ctx.args.matte and (ctx.rvm is not None)):
         return None
     if ((caches.frames % max(1, ctx.args.rvm_every)) == 0) or (caches.last_alpha_src is None):
+        frame_h, frame_w = frame_bgr.shape[:2]
+        if (caches.last_rvm_mode != "full") or (caches.last_rvm_input_hw != (frame_h, frame_w)):
+            ctx.rvm.reset_states()
         alpha_src = ctx.rvm.alpha(frame_bgr, downsample=float(ctx.args.rvm_down))
         caches.last_alpha_src = alpha_src
+        caches.last_rvm_mode = "full"
+        caches.last_rvm_input_hw = (frame_h, frame_w)
         return alpha_src
     return caches.last_alpha_src
 
@@ -136,6 +158,9 @@ def run_rvm_on_roi_or_full(ctx: RunContext, caches: Caches, frame_bgr, bbox_src,
         return np.zeros((fh, fw), np.uint8)
 
     roi_bgr_in = cv2.resize(roi_bgr, (RVM_IN_W, RVM_IN_H), interpolation=cv2.INTER_LINEAR)
+    roi_input_hw = (RVM_IN_H, RVM_IN_W)
+    if (caches.last_rvm_mode != "roi") or (caches.last_rvm_input_hw != roi_input_hw):
+        ctx.rvm.reset_states()
     roi_alpha_in = ctx.rvm.alpha(
         roi_bgr_in,
         downsample=float(ctx.args.rvm_down),
@@ -146,6 +171,8 @@ def run_rvm_on_roi_or_full(ctx: RunContext, caches: Caches, frame_bgr, bbox_src,
     roi_alpha = cv2.resize(roi_alpha_in, (roi_w, roi_h), interpolation=cv2.INTER_LINEAR)
     alpha_src = np.zeros((fh, fw), dtype=np.uint8)
     alpha_src[y1:y2, x1:x2] = roi_alpha
+    caches.last_rvm_mode = "roi"
+    caches.last_rvm_input_hw = roi_input_hw
     return alpha_src
 
 
