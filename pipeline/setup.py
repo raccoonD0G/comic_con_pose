@@ -65,6 +65,42 @@ def build_models(args: argparse.Namespace) -> Tuple[Any, Any, Optional[Any], Any
     return device, pose, rvm, hands
 
 
+def warmup_cuda_kernels(
+    args: argparse.Namespace,
+    device: Any,
+    pose: Any,
+    rvm: Optional[Any],
+    cam_w: int,
+    cam_h: int,
+) -> None:
+    torch = lazy.torch
+    np = lazy.np
+
+    if getattr(args, "no_warmup", False):
+        return
+    if getattr(device, "type", None) != "cuda":
+        return
+
+    try:
+        stream = torch.cuda.Stream(device=device)
+        dummy = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        with torch.cuda.stream(stream):
+            pose.predict_downscaled(dummy, scale=0.0)
+            if rvm is not None:
+                rvm.alpha(
+                    dummy,
+                    downsample=float(args.rvm_down),
+                    enforce_stride=True,
+                    stride=8,
+                    reset_on_resize=True,
+                )
+        torch.cuda.current_stream(device).wait_stream(stream)
+        if rvm is not None:
+            rvm.reset_states()
+    except Exception as exc:  # pragma: no cover - warm-up is best effort
+        print(f"[WARN] CUDA warm-up skipped: {exc}")
+
+
 def build_sender_or_exit(args: argparse.Namespace, width: int, height: int) -> Any:
     try:
         return lazy.NDISender(args.ndi_name, width, height, args.fpsN, args.fpsD)
