@@ -10,7 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import tkinter as tk
@@ -602,6 +602,277 @@ SCHEMA: Dict[str, List[FieldSpec]] = {
 }
 
 
+class SettingsForm:
+    """Reusable Tkinter form that renders SCHEMA and exposes helpers."""
+
+    def __init__(self, parent: "tk.Widget", defaults: Dict[str, Any]):
+        if tk is None or ttk is None:
+            raise RuntimeError("Tkinter is not available on this system")
+        self.parent = parent
+        self.defaults = defaults.copy()
+        self.registry: Dict[str, Dict[str, Any]] = {}
+        self._global_disabled = False
+        self._trace_handles: List[Tuple[tk.Variable, str]] = []
+        self._build_ui(defaults)
+
+    def _build_ui(self, defaults: Dict[str, Any]) -> None:
+        style = ttk.Style(self.parent)
+        with contextlib.suppress(Exception):
+            style.theme_use("clam")
+
+        self.nb = ttk.Notebook(self.parent)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        for tab_name, fields in SCHEMA.items():
+            frame = ttk.Frame(self.nb)
+            self.nb.add(frame, text=tab_name)
+            self._add_help_label(frame, TAB_DESCRIPTIONS.get(tab_name, ""))
+            for spec in fields:
+                self._add_field(frame, spec, defaults)
+
+        self._attach_traces()
+        self._update_state()
+
+    def _add_help_label(self, parent: "tk.Widget", text: str) -> None:
+        if not text:
+            return
+        hl = ttk.Label(parent, text=text, foreground="#666", wraplength=820, justify="left")
+        hl.pack(fill="x", padx=6, pady=(6, 2))
+
+    def _add_field(self, frame: "tk.Widget", spec: FieldSpec, defaults: Dict[str, Any]) -> None:
+        registry = self.registry
+        row = ttk.Frame(frame)
+        row.pack(fill="x", padx=6, pady=4)
+
+        lbl = ttk.Label(row, text=spec.label, width=28, anchor="w")
+        lbl.pack(side="left")
+
+        widgets = [lbl]
+        val = defaults.get(spec.key, spec.default)
+
+        if spec.type == "bool":
+            var: tk.Variable = tk.BooleanVar(value=bool(val))
+            cb = ttk.Checkbutton(row, variable=var)
+            cb.pack(side="left")
+            widgets.append(cb)
+
+        elif spec.type == "choice":
+            var = tk.StringVar(value=str(val))
+            om = ttk.OptionMenu(row, var, str(val), *[str(c) for c in spec.choices])
+            om.pack(side="left", fill="x", expand=True)
+            widgets.append(om)
+
+        elif spec.type == "camera":
+            choices = CAMERA_CHOICES
+            if choices:
+                var = tk.StringVar()
+                display: List[str] = []
+                mapping: Dict[str, int] = {}
+                for idx, name in choices:
+                    label = f"[{idx}] {name}" if name else f"Camera {idx}"
+                    display.append(label)
+                    mapping[label] = idx
+
+                default_idx = int(val) if isinstance(val, int) else int(spec.default)
+                default_label = None
+                for label, idx in mapping.items():
+                    if idx == default_idx:
+                        default_label = label
+                        break
+                if default_label is None and display:
+                    default_label = display[0]
+                if default_label:
+                    var.set(default_label)
+
+                cb = ttk.Combobox(row, textvariable=var, values=display, state="readonly")
+                cb.pack(side="left", fill="x", expand=True)
+                widgets.append(cb)
+                registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type, "choices_map": mapping}
+                return
+
+            var = tk.StringVar(value=str(val))
+            ent = ttk.Entry(row, textvariable=var)
+            ent.pack(side="left", fill="x", expand=True)
+            widgets.append(ent)
+
+        elif spec.type == "file":
+            var = tk.StringVar(value=str(val))
+            ent = ttk.Entry(row, textvariable=var)
+            ent.pack(side="left", fill="x", expand=True)
+
+            def browse(current: tk.StringVar = var) -> None:
+                path = filedialog.askopenfilename() or current.get()
+                current.set(path)
+
+            btn = ttk.Button(row, text="Browse", command=browse)
+            btn.pack(side="left", padx=6)
+            widgets.extend([ent, btn])
+
+        else:
+            var = tk.StringVar(value=str(val))
+            ent = ttk.Entry(row, textvariable=var)
+            ent.pack(side="left", fill="x", expand=True)
+            widgets.append(ent)
+
+        if spec.help and spec.type != "bool":
+            help_lbl = ttk.Label(row, text=spec.help, foreground="#777")
+            help_lbl.pack(side="left", padx=8)
+            widgets.append(help_lbl)
+
+        if spec.type == "bool" and spec.help:
+            sub = ttk.Label(frame, text=spec.help, foreground="#666", wraplength=820, justify="left")
+            sub.pack(fill="x", padx=6, pady=(2, 6))
+            widgets.append(sub)
+
+        registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type}
+
+    def _attach_traces(self) -> None:
+        registry = self.registry
+
+        def set_enabled(keys: Iterable[str], enabled: bool) -> None:
+            state = "normal" if (enabled and not self._global_disabled) else "disabled"
+            for k in keys:
+                info = registry.get(k)
+                if not info:
+                    continue
+                for w in info["widgets"]:
+                    with contextlib.suppress(tk.TclError):
+                        w.configure(state=state)
+
+        self._set_enabled = set_enabled  # type: ignore[attr-defined]
+
+        def update_state(*_args: object) -> None:
+            def enabled(key: str) -> bool:
+                info = registry.get(key)
+                if not info:
+                    return False
+                val = info["var"].get()
+                if isinstance(val, str):
+                    return val not in ("", "0", "False")
+                return bool(val)
+
+            set_enabled(["center_method", "center_smooth", "center_deadzone"], enabled("center"))
+
+            hands_on = enabled("hands")
+            set_enabled([
+                "hands_max", "hands_det_conf", "hands_track_conf", "hands_complexity",
+                "hands_roi", "hands_every"
+            ], hands_on)
+            set_enabled(["roi_pad_x", "roi_pad_y"], hands_on and enabled("hands_roi"))
+
+            set_enabled(["rvm_every", "rvm_down", "bbox_clip"], enabled("matte"))
+
+            grade_on = enabled("grade")
+            set_enabled([
+                "grade_mode", "bg_ref", "grade_dark", "grade_gamma",
+                "grade_contrast", "tint_b", "tint_g", "tint_r", "tint_strength"
+            ], grade_on)
+
+            set_enabled(["w", "h"], not enabled("ndi_follow_camera"))
+
+            if "bbox_cutout" in registry:
+                cutout_on = enabled("bbox_cutout")
+                set_enabled([
+                    "bbox_pad_x", "bbox_pad_y", "bbox_feather",
+                    "bbox_person_mode", "bbox_min_area", "bbox_conf_min", "bbox_debug"
+                ], cutout_on)
+
+        self._update_state = update_state  # type: ignore[attr-defined]
+
+        for key in ["center", "hands", "hands_roi", "matte", "grade", "ndi_follow_camera", "bbox_cutout"]:
+            info = registry.get(key)
+            if not info:
+                continue
+            var = info["var"]
+            if isinstance(var, tk.Variable):
+                handle = var.trace_add("write", update_state)
+                self._trace_handles.append((var, handle))
+
+    def collect_values(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for _, fields in SCHEMA.items():
+            for spec in fields:
+                info = self.registry[spec.key]
+                var = info["var"]
+                if spec.type == "bool":
+                    result[spec.key] = bool(var.get())
+                elif spec.type == "choice":
+                    val = var.get()
+                    if isinstance(spec.default, int):
+                        result[spec.key] = int(val)
+                    elif isinstance(spec.default, float):
+                        result[spec.key] = float(val)
+                    else:
+                        result[spec.key] = val
+                elif spec.type == "camera":
+                    mapping = info.get("choices_map")
+                    if mapping:
+                        sel = var.get()
+                        idx = mapping.get(sel)
+                        if idx is None:
+                            with contextlib.suppress(ValueError):
+                                idx = int(sel)
+                        if idx is None:
+                            idx = int(spec.default)
+                        result[spec.key] = int(idx)
+                    else:
+                        s = var.get()
+                        result[spec.key] = int(s) if s != "" else int(spec.default)
+                else:
+                    s = var.get()
+                    if spec.type == "int":
+                        result[spec.key] = int(s) if s != "" else int(spec.default)
+                    elif spec.type == "float":
+                        result[spec.key] = float(s) if s != "" else float(spec.default)
+                    else:
+                        result[spec.key] = s
+        return result
+
+    def set_values(self, values: Dict[str, Any]) -> None:
+        for _, fields in SCHEMA.items():
+            for spec in fields:
+                info = self.registry.get(spec.key)
+                if not info:
+                    continue
+                var = info["var"]
+                value = values.get(spec.key, spec.default)
+                if spec.type == "bool":
+                    var.set(bool(value))
+                elif spec.type == "camera":
+                    mapping = info.get("choices_map")
+                    if mapping:
+                        target = next((label for label, idx in mapping.items() if idx == int(value)), None)
+                        if target is not None:
+                            var.set(target)
+                        elif mapping:
+                            first = next(iter(mapping))
+                            var.set(first)
+                    else:
+                        var.set(str(value))
+                else:
+                    var.set("" if value is None else str(value))
+
+        self._update_state()
+
+    def set_running(self, running: bool) -> None:
+        self._global_disabled = running
+        state = "disabled" if running else "normal"
+        for info in self.registry.values():
+            for w in info["widgets"]:
+                with contextlib.suppress(tk.TclError):
+                    w.configure(state=state)
+        if not running:
+            self._update_state()
+
+    def focus_first(self) -> None:
+        for info in self.registry.values():
+            for w in info["widgets"]:
+                if getattr(w, "focus_set", None):
+                    with contextlib.suppress(Exception):
+                        w.focus_set()
+                    return
+
+
 def defaults_from_schema() -> dict:
     d = {}
     for fields in SCHEMA.values():
@@ -636,238 +907,27 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
     root.title("WebcamCutout — Startup")
     root.geometry("900x680")
 
-    style = ttk.Style()
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
+    form = SettingsForm(root, defaults)
+    form.focus_first()
 
-    nb = ttk.Notebook(root)
-    nb.pack(fill="both", expand=True, padx=8, pady=8)
-
-    # key -> {"var": tk.Variable, "widgets": [widget,...], "type": "bool"/...}
-    registry: Dict[str, Dict[str, Any]] = {}
-
-    def add_help_label(parent, text: str):
-        if not text:
-            return
-        hl = ttk.Label(parent, text=text, foreground="#666", wraplength=820, justify="left")
-        hl.pack(fill="x", padx=6, pady=(6, 2))
-
-    def add_field(frame, spec: FieldSpec):
-        row = ttk.Frame(frame)
-        row.pack(fill="x", padx=6, pady=4)
-
-        # 라벨
-        lbl = ttk.Label(row, text=spec.label, width=28, anchor="w")
-        lbl.pack(side="left")
-
-        widgets = [lbl]
-        val = defaults.get(spec.key, spec.default)
-
-        if spec.type == "bool":
-            var = tk.BooleanVar(value=bool(val))
-            cb = ttk.Checkbutton(row, variable=var)
-            cb.pack(side="left")
-            widgets.append(cb)
-
-        elif spec.type == "choice":
-            var = tk.StringVar(value=str(val))
-            om = ttk.OptionMenu(row, var, str(val), *[str(c) for c in spec.choices])
-            om.pack(side="left", fill="x", expand=True)
-            widgets.append(om)
-
-        elif spec.type == "camera":
-            choices = CAMERA_CHOICES
-            if choices:
-                var = tk.StringVar()
-                display: List[str] = []
-                mapping: Dict[str, int] = {}
-                for idx, name in choices:
-                    label = f"[{idx}] {name}" if name else f"Camera {idx}"
-                    display.append(label)
-                    mapping[label] = idx
-
-                default_idx = int(val) if isinstance(val, int) else int(spec.default)
-                default_label = None
-                for label, idx in mapping.items():
-                    if idx == default_idx:
-                        default_label = label
-                        break
-                if default_label is None and display:
-                    default_label = display[0]
-                if default_label:
-                    var.set(default_label)
-
-                cb = ttk.Combobox(row, textvariable=var, values=display)
-                cb.pack(side="left", fill="x", expand=True)
-                widgets.append(cb)
-                registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type, "choices_map": mapping}
-                return
-
-            # fallback: manual entry
-            var = tk.StringVar(value=str(val))
-            ent = ttk.Entry(row, textvariable=var)
-            ent.pack(side="left", fill="x", expand=True)
-            widgets.append(ent)
-
-        elif spec.type == "file":
-            var = tk.StringVar(value=str(val))
-            ent = ttk.Entry(row, textvariable=var)
-            ent.pack(side="left", fill="x", expand=True)
-            btn = ttk.Button(row, text="Browse", command=lambda v=var: v.set(filedialog.askopenfilename() or v.get()))
-            btn.pack(side="left", padx=6)
-            widgets.extend([ent, btn])
-
-        else:
-            # str/int/float
-            var = tk.StringVar(value=str(val))
-            ent = ttk.Entry(row, textvariable=var)
-            ent.pack(side="left", fill="x", expand=True)
-            widgets.append(ent)
-
-        # help 텍스트(필드 단위)
-        if spec.help and spec.type != "bool":
-            ttk.Label(row, text=spec.help, foreground="#777").pack(side="left", padx=8)
-
-        # bool 토글류는 다음 줄에 안내문을 더 크게 배치
-        if spec.type == "bool" and spec.help:
-            sub = ttk.Label(frame, text=spec.help, foreground="#666", wraplength=820, justify="left")
-            sub.pack(fill="x", padx=6, pady=(2, 6))
-            widgets.append(sub)
-
-        registry[spec.key] = {"var": var, "widgets": widgets, "type": spec.type}
-
-    # 탭 구성
-    for tab_name, fields in SCHEMA.items():
-        frame = ttk.Frame(nb)
-        nb.add(frame, text=tab_name)
-        add_help_label(frame, TAB_DESCRIPTIONS.get(tab_name, ""))
-        for spec in fields:
-            add_field(frame, spec)
-
-    # --- 의존성/상태 업데이트 ---
-    def set_enabled(keys: List[str], enabled: bool):
-        state = "normal" if enabled else "disabled"
-        for k in keys:
-            info = registry.get(k)
-            if not info:
-                continue
-            for w in info["widgets"]:
-                try:
-                    w.configure(state=state)
-                except tk.TclError:
-                    # 일반 Label 등은 state 옵션이 없을 수 있음
-                    pass
-
-    def update_state(*_):
-        # center -> method/smooth/deadzone
-        set_enabled(["center_method", "center_smooth", "center_deadzone"],
-                    registry["center"]["var"].get())
-
-        # hands -> all hands_* (자기 자신 제외) + roi pads
-        hands_on = registry["hands"]["var"].get()
-        set_enabled(
-            ["hands_max", "hands_det_conf", "hands_track_conf", "hands_complexity",
-             "hands_roi", "hands_every"],
-            hands_on
-        )
-        # hands_roi -> roi pads
-        set_enabled(["roi_pad_x", "roi_pad_y"], hands_on and registry["hands_roi"]["var"].get())
-
-        # matte -> rvm_every, rvm_down, bbox_clip(Output에 있지만 matting과 강결합)
-        set_enabled(["rvm_every", "rvm_down", "bbox_clip"], registry["matte"]["var"].get())
-
-        # grade -> grade_* 전부 (grade_mode/bg_ref 포함)
-        grade_on = registry["grade"]["var"].get()
-        set_enabled(["grade_mode", "bg_ref", "grade_dark", "grade_gamma",
-                     "grade_contrast", "tint_b", "tint_g", "tint_r", "tint_strength"],
-                    grade_on)
-
-        # ndi_follow_camera -> w/h 비활성화
-        set_enabled(["w", "h"], not registry["ndi_follow_camera"]["var"].get())
-
-        # matte -> rvm_every, rvm_down, bbox_clip
-        set_enabled(["rvm_every", "rvm_down", "bbox_clip"], registry["matte"]["var"].get())
-
-        # grade -> grade_* 전부
-        grade_on = registry["grade"]["var"].get()
-        set_enabled(["grade_mode", "bg_ref", "grade_dark", "grade_gamma",
-                     "grade_contrast", "tint_b", "tint_g", "tint_r", "tint_strength"],
-                    grade_on)
-
-        # ndi_follow_camera -> w/h 비활성화
-        set_enabled(["w", "h"], not registry["ndi_follow_camera"]["var"].get())
-
-        # === NEW: bbox_cutout 의존성 ===
-        if "bbox_cutout" in registry:
-            cutout_on = registry["bbox_cutout"]["var"].get()
-            set_enabled([
-                "bbox_pad_x", "bbox_pad_y", "bbox_feather",
-                "bbox_person_mode", "bbox_min_area", "bbox_conf_min", "bbox_debug"
-            ], cutout_on)
-
-    # 토글 변수에 trace 걸기
-    for k in ["center", "hands", "hands_roi", "matte", "grade", "ndi_follow_camera", "bbox_cutout"]:
-        if k in registry and isinstance(registry[k]["var"], tk.Variable):
-            registry[k]["var"].trace_add("write", update_state)
-
-    # 초기 상태 반영
-    update_state()
-
-    # 버튼
-    btns = ttk.Frame(root)
-    btns.pack(fill="x", padx=8, pady=8)
     result: Dict[str, Any] = {}
 
-    def on_start():
+    def on_start() -> None:
+        nonlocal result
         try:
-            for _, fields in SCHEMA.items():
-                for spec in fields:
-                    info = registry[spec.key]
-                    var = info["var"]
-                    if spec.type == "bool":
-                        result[spec.key] = bool(var.get())
-                    elif spec.type == "choice":
-                        val = var.get()
-                        if isinstance(spec.default, int):
-                            result[spec.key] = int(val)
-                        elif isinstance(spec.default, float):
-                            result[spec.key] = float(val)
-                        else:
-                            result[spec.key] = val
-                    elif spec.type == "camera":
-                        mapping = info.get("choices_map")
-                        if mapping:
-                            sel = var.get()
-                            idx = mapping.get(sel)
-                            if idx is None:
-                                with contextlib.suppress(ValueError):
-                                    idx = int(sel)
-                            if idx is None:
-                                idx = int(spec.default)
-                            result[spec.key] = int(idx)
-                        else:
-                            s = var.get()
-                            result[spec.key] = int(s) if s != "" else int(spec.default)
-                    else:
-                        s = var.get()
-                        if spec.type == "int":
-                            result[spec.key] = int(s) if s != "" else int(spec.default)
-                        elif spec.type == "float":
-                            result[spec.key] = float(s) if s != "" else float(spec.default)
-                        else:
-                            result[spec.key] = s
-        except Exception as e:
-            messagebox.showerror("Error", f"Invalid input: {e}")
+            result = form.collect_values()
+        except Exception as exc:  # pragma: no cover - UI feedback path
+            messagebox.showerror("Error", f"Invalid input: {exc}")
             return
         root.destroy()
 
-    def on_cancel():
-        result.clear()
-        result.update(defaults)
+    def on_cancel() -> None:
+        nonlocal result
+        result = defaults.copy()
         root.destroy()
 
+    btns = ttk.Frame(root)
+    btns.pack(fill="x", padx=8, pady=8)
     ttk.Button(btns, text="Start", command=on_start).pack(side="right")
     ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=6)
 
@@ -875,7 +935,7 @@ def _build_gui_and_get_values(defaults: dict) -> dict:
     return result or defaults
 
 
-def get_args_with_gui_fallback(ap: argparse.ArgumentParser) -> argparse.Namespace:
+def get_args_with_gui_fallback(ap: argparse.ArgumentParser, initial: Optional[Dict[str, Any]] = None) -> argparse.Namespace:
     """
     - CLI 인자를 주면: ap.parse_args() 그대로 사용
     - 인자가 없으면: Tkinter GUI로 값 입력받아 argparse.Namespace 생성
@@ -883,5 +943,7 @@ def get_args_with_gui_fallback(ap: argparse.ArgumentParser) -> argparse.Namespac
     if len(sys.argv) > 1:
         return ap.parse_args()
     defaults = defaults_from_schema()
+    if initial:
+        defaults.update(initial)
     gui_vals = _build_gui_and_get_values(defaults)
     return namespace_from_dict(gui_vals)
