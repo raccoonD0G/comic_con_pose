@@ -12,6 +12,7 @@ from runtime import lazy_modules as lazy
 from .context import Caches, RunContext
 from .frame_ops import (
     apply_cutout_if_requested,
+    apply_input_flips_if_needed,
     apply_matte_and_grade,
     compute_bbox_canvas,
     compute_center_and_transform,
@@ -133,6 +134,8 @@ def run_loop(ctx: RunContext) -> None:
             frame_bgr = rotate_if_needed(frame_bgr, ctx.args.rotate)
             prof.mark("rotate")
 
+            frame_bgr, input_flip_applied = apply_input_flips_if_needed(ctx, frame_bgr)
+
             caches.frames += 1
 
             xy_use_src, conf_use, bbox_src_debug = run_pose_every(ctx, caches, frame_bgr)
@@ -163,7 +166,7 @@ def run_loop(ctx: RunContext) -> None:
             prof.mark("prep")
 
             frame_rgba, xy_send, hands_send, bbox_canvas = apply_output_flips_if_needed(
-                ctx, frame_rgba, xy_send, hands_send, bbox_canvas
+                ctx, frame_rgba, xy_send, hands_send, bbox_canvas, skip=input_flip_applied
             )
             prof.mark("flip")
 
