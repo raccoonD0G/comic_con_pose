@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Optional
 
-from runtime import Profiler, ensure_components_loaded, ensure_runtime_modules, ensure_utils_loaded
+from runtime import Profiler
 from runtime import lazy_modules as lazy
 
 from .context import Caches, RunContext
@@ -16,7 +16,7 @@ from .frame_ops import (
     compute_bbox_canvas,
     compute_center_and_transform,
     log_fps,
-    mirror_if_needed,
+    apply_output_flips_if_needed,
     prepare_coordinates_and_hands,
     rotate_if_needed,
     run_hands_every,
@@ -38,10 +38,6 @@ from .setup import (
 
 
 def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
-    ensure_runtime_modules()
-    ensure_utils_loaded()
-    ensure_components_loaded()
-
     width, height = args.w, args.h
     kp_thr = float(lazy.np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or lazy.ONLY_NEAREST
@@ -139,8 +135,10 @@ def run_loop(ctx: RunContext) -> None:
             xy_send, conf_send, hands_send = prepare_coordinates_and_hands(ctx, M, xy_use_src, conf_use, hands_src, bbox_canvas)
             prof.mark("prep")
 
-            frame_rgba, xy_send, hands_send, bbox_canvas = mirror_if_needed(ctx, frame_rgba, xy_send, hands_send, bbox_canvas)
-            prof.mark("mirror")
+            frame_rgba, xy_send, hands_send, bbox_canvas = apply_output_flips_if_needed(
+                ctx, frame_rgba, xy_send, hands_send, bbox_canvas
+            )
+            prof.mark("flip")
 
             frame_to_send = frame_rgba if frame_rgba.flags["C_CONTIGUOUS"] else np.ascontiguousarray(frame_rgba)
             ctx.udp.send(xy_send, conf_send, hands_send)
