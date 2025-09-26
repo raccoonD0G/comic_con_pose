@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Optional
 
-from runtime import Profiler, ensure_components_loaded, ensure_runtime_modules, ensure_utils_loaded
+from runtime import Profiler
 from runtime import lazy_modules as lazy
 
 from .context import Caches, RunContext
@@ -38,10 +38,6 @@ from .setup import (
 
 
 def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
-    ensure_runtime_modules()
-    ensure_utils_loaded()
-    ensure_components_loaded()
-
     width, height = args.w, args.h
     kp_thr = float(lazy.np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or lazy.ONLY_NEAREST
