@@ -26,6 +26,7 @@ import traceback
 import time
 from collections import deque
 from dataclasses import dataclass, field
+
 from time import perf_counter
 from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING, Any
 
@@ -206,6 +207,12 @@ def ensure_utils_loaded() -> None:
     _utils_loaded = True
 
 
+from ui.gui_startup import (
+    SettingsForm,
+    defaults_from_schema,
+    get_args_with_gui_fallback,
+    namespace_from_dict,
+)
 from ui.gui_startup import (
     SettingsForm,
     defaults_from_schema,
