@@ -519,7 +519,8 @@ SCHEMA: Dict[str, List[FieldSpec]] = {
         FieldSpec("cap_fps", "Capture FPS (0=auto)", "float", 0.0),
         FieldSpec("mjpg", "Use MJPG", "bool", False),
         FieldSpec("rotate", "Rotate CW", "choice", 270, choices=[0, 90, 180, 270]),
-        FieldSpec("mirror", "Mirror output", "bool", True),
+        FieldSpec("horizontal_flip", "Flip horizontally", "bool", True),
+        FieldSpec("flip_vertical", "Flip vertically", "bool", False),
         FieldSpec("ndi_follow_camera", "NDI follow camera size", "bool", False, help=FEATURE_HELP["ndi_follow_camera"]),
     ],
     "Output": [
