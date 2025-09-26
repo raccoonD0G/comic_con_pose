@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 @dataclass
 class RunContext:
@@ -37,6 +37,8 @@ class Caches:
     last_bbox_src_debug: Optional[Any] = None
     last_hands_src: Optional[List[Dict[str, Any]]] = None
     last_alpha_src: Optional[Any] = None
+    last_rvm_mode: Optional[str] = None
+    last_rvm_input_hw: Optional[Tuple[int, int]] = None
     frames: int = 0
     last_log: float = 0.0
     last_pose_result_id: int = -1
