@@ -321,18 +321,38 @@ def prepare_coordinates_and_hands(ctx: RunContext, M, xy_use_src, conf_use, hand
     return xy_send, conf_send, hands_send
 
 
-def apply_output_flips_if_needed(ctx: RunContext, frame_rgba, xy_send, hands_send, bbox_canvas):
-    cv2 = lazy.cv2
+def _get_flip_flags(ctx: RunContext):
     flip_h = bool(getattr(ctx.args, "horizontal_flip", False))
     flip_v = bool(getattr(ctx.args, "flip_vertical", False))
+    return flip_h, flip_v
+
+
+def _get_flip_code(flip_h: bool, flip_v: bool) -> int:
+    if flip_h and flip_v:
+        return -1
+    if flip_h:
+        return 1
+    return 0
+
+
+def apply_input_flips_if_needed(ctx: RunContext, frame_bgr):
+    cv2 = lazy.cv2
+    flip_h, flip_v = _get_flip_flags(ctx)
+    if not (flip_h or flip_v):
+        return frame_bgr, False
+    flip_code = _get_flip_code(flip_h, flip_v)
+    frame_bgr = cv2.flip(frame_bgr, flip_code)
+    return frame_bgr, True
+
+
+def apply_output_flips_if_needed(ctx: RunContext, frame_rgba, xy_send, hands_send, bbox_canvas, *, skip: bool = False):
+    if skip:
+        return frame_rgba, xy_send, hands_send, bbox_canvas
+    cv2 = lazy.cv2
+    flip_h, flip_v = _get_flip_flags(ctx)
     if not (flip_h or flip_v):
         return frame_rgba, xy_send, hands_send, bbox_canvas
-    if flip_h and flip_v:
-        flip_code = -1
-    elif flip_h:
-        flip_code = 1
-    else:
-        flip_code = 0
+    flip_code = _get_flip_code(flip_h, flip_v)
     frame_rgba = cv2.flip(frame_rgba, flip_code)
     if xy_send is not None:
         if flip_h:
