@@ -24,15 +24,32 @@ def rotate_if_needed(frame_bgr, rot: int):
 
 def run_pose_every(ctx: RunContext, caches: Caches, frame_bgr):
     np = lazy.np
-    xy_all_src = conf_all = None
-    if (caches.frames % max(1, ctx.args.pose_every)) == 0:
-        xy_all_src, conf_all = ctx.pose.predict_downscaled(frame_bgr, scale=float(ctx.args.pose_scale))
-        if xy_all_src is not None:
-            caches.last_xy_all_src = xy_all_src
-            caches.last_conf_all = conf_all
-    else:
+    pose_worker = getattr(ctx, "pose_worker", None)
+
+    if pose_worker is not None:
+        if (caches.frames % max(1, ctx.args.pose_every)) == 0:
+            pose_worker.submit(frame_bgr)
+
+        latest = pose_worker.latest()
+        if latest is not None:
+            pose_id, xy_all_src, conf_all = latest
+            if pose_id != caches.last_pose_result_id:
+                caches.last_pose_result_id = pose_id
+                caches.last_xy_all_src = xy_all_src
+                caches.last_conf_all = conf_all
+
         xy_all_src = caches.last_xy_all_src
         conf_all = caches.last_conf_all
+    else:
+        xy_all_src = conf_all = None
+        if (caches.frames % max(1, ctx.args.pose_every)) == 0:
+            xy_all_src, conf_all = ctx.pose.predict_downscaled(frame_bgr, scale=float(ctx.args.pose_scale))
+            if xy_all_src is not None:
+                caches.last_xy_all_src = xy_all_src
+                caches.last_conf_all = conf_all
+        else:
+            xy_all_src = caches.last_xy_all_src
+            conf_all = caches.last_conf_all
 
     bbox_src_debug = None
     if xy_all_src is not None:

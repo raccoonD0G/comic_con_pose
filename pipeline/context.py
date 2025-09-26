@@ -23,6 +23,7 @@ class RunContext:
     hands: Any
     sender: Any
     udp: Any
+    pose_worker: Optional[Any]
 
     stats: Optional[Dict[str, Any]]
     lut_gamma_dark: Optional[Any]
@@ -38,6 +39,7 @@ class Caches:
     last_alpha_src: Optional[Any] = None
     frames: int = 0
     last_log: float = 0.0
+    last_pose_result_id: int = -1
 
 
 __all__ = ["RunContext", "Caches"]
