@@ -8,6 +8,7 @@ from pipeline import run_pipeline
 from ui.control_panel import ControlPanelApp
 
 
+
 def main() -> None:
     if len(sys.argv) > 1:
         args = parse_args()
@@ -21,6 +22,7 @@ def main() -> None:
         args = parse_args()
         run_pipeline(args)
         return
+
 
     app.run()
 
