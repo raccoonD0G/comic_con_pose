@@ -16,7 +16,7 @@ from .frame_ops import (
     compute_bbox_canvas,
     compute_center_and_transform,
     log_fps,
-    mirror_if_needed,
+    apply_output_flips_if_needed,
     prepare_coordinates_and_hands,
     rotate_if_needed,
     run_hands_every,
@@ -139,8 +139,10 @@ def run_loop(ctx: RunContext) -> None:
             xy_send, conf_send, hands_send = prepare_coordinates_and_hands(ctx, M, xy_use_src, conf_use, hands_src, bbox_canvas)
             prof.mark("prep")
 
-            frame_rgba, xy_send, hands_send, bbox_canvas = mirror_if_needed(ctx, frame_rgba, xy_send, hands_send, bbox_canvas)
-            prof.mark("mirror")
+            frame_rgba, xy_send, hands_send, bbox_canvas = apply_output_flips_if_needed(
+                ctx, frame_rgba, xy_send, hands_send, bbox_canvas
+            )
+            prof.mark("flip")
 
             frame_to_send = frame_rgba if frame_rgba.flags["C_CONTIGUOUS"] else np.ascontiguousarray(frame_rgba)
             ctx.udp.send(xy_send, conf_send, hands_send)

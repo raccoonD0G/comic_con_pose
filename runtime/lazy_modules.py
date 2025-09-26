@@ -68,7 +68,14 @@ def ensure_runtime_modules() -> None:
     if cv2 is None:
         globals()["cv2"] = importlib.import_module("cv2")
     if torch is None:
-        globals()["torch"] = importlib.import_module("torch")
+        try:
+            globals()["torch"] = importlib.import_module("torch")
+        except ModuleNotFoundError as exc:  # pragma: no cover - packaging guard
+            raise ModuleNotFoundError(
+                "PyTorch is required but not installed. Install it with "
+                "`pip install torch --index-url https://download.pytorch.org/whl/cu121` "
+                "or the appropriate wheel for your platform."
+            ) from exc
         if torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
             try:

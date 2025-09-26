@@ -35,7 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--queue-len", type=int, default=1)
     ap.add_argument("--cap-fps", type=float, default=0.0)
     ap.add_argument("--mjpg", action="store_true")
-    ap.add_argument("--mirror", default=True, action="store_true")
+    ap.add_argument("--horizontal-flip", dest="horizontal_flip", default=True, action="store_true",
+                    help="Flip the output horizontally")
+    ap.add_argument("--flip-vertical", dest="flip_vertical", action="store_true", default=False,
+                    help="Flip the output vertically")
 
     ap.add_argument("--hands", action="store_true", default=False)
     ap.add_argument("--hands-max", type=int, default=2)
