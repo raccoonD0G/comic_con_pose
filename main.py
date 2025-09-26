@@ -16,26 +16,72 @@ Author: refactor+opt by ChatGPT
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import socket
 import struct
 import sys
 import threading
+import traceback
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
-
-import cv2
-import numpy as np
-import torch
-
-import NDIlib as ndi
-import mediapipe as mp
-from ultralytics import YOLO
-
-import os
-
+from dataclasses import dataclass, field
 from time import perf_counter
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    import cv2  # noqa: F401
+    import numpy as np  # noqa: F401
+    import torch  # noqa: F401
+    import NDIlib as ndi  # noqa: F401
+    import mediapipe as mp  # noqa: F401
+    from ultralytics import YOLO  # noqa: F401
+
+
+# Heavy runtime modules (cv2/torch/etc.) are imported lazily so the GUI can
+# appear instantly even in a PyInstaller build. They will be populated the
+# first time `ensure_runtime_modules()` is called inside `build_context()`.
+cv2 = None  # type: ignore[assignment]
+np = None  # type: ignore[assignment]
+torch = None  # type: ignore[assignment]
+ndi = None  # type: ignore[assignment]
+mp = None  # type: ignore[assignment]
+YOLO = None  # type: ignore[assignment]
+
+_runtime_modules_loaded = False
+
+
+def ensure_runtime_modules() -> None:
+    """Import heavy runtime dependencies on demand."""
+
+    global _runtime_modules_loaded, cv2, np, torch, ndi, mp, YOLO
+
+    if _runtime_modules_loaded:
+        return
+
+    if np is None:
+        globals()["np"] = importlib.import_module("numpy")
+    if cv2 is None:
+        globals()["cv2"] = importlib.import_module("cv2")
+    if torch is None:
+        globals()["torch"] = importlib.import_module("torch")
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("medium")
+            except Exception:
+                pass
+    if ndi is None:
+        globals()["ndi"] = importlib.import_module("NDIlib")
+    if mp is None:
+        try:
+            globals()["mp"] = importlib.import_module("mediapipe")
+        except Exception:
+            globals()["mp"] = None
+    if YOLO is None:
+        globals()["YOLO"] = importlib.import_module("ultralytics").YOLO
+
+    _runtime_modules_loaded = True
 
 class Profiler:
     __slots__ = ("t0","marks","frame_ms_ema","fps_ema","enabled")
@@ -71,17 +117,6 @@ class Profiler:
             print(f"[PROF] frame={frame_idx} total={total_ms:.1f}ms | {parts} | ema={self.frame_ms_ema:.1f}ms | fps≈{self.fps_ema:.1f}")
             self.marks.clear()
 
-# ---------------------------
-# Runtime perf hints (CUDA)
-# ---------------------------
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-    try:
-        torch.set_float32_matmul_precision("medium")
-    except Exception:
-        pass
-
-
 def resource_path(relative_path):
     """ PyInstaller 실행 또는 개발 환경에서 리소스 파일 경로 얻기 """
     if hasattr(sys, '_MEIPASS'):
@@ -91,26 +126,130 @@ def resource_path(relative_path):
 
 
 # =========================
-# Utils
+# Utils (lazy loaded)
 # =========================
 
-from utils import (
-    ONLY_NEAREST, K, SKELETON_EDGES, HANDS_EDGES,
-    UDP_IP, UDP_PORT, HEADER_V2_FMT, MAGIC, VERSION, HAND_HEAD_FMT,
-    fourcc_to_str, kps_to_bbox, make_letterbox_affine, apply_affine_xy,
-    bbox_apply_affine, person_center, clip_int,
-    draw_pose, draw_hands, make_bbox_mask, warp_mask_to_canvas, cutout_alpha_inplace, padded_bbox_src, ema_rect, crop_safe, padded_bbox_src
+ONLY_NEAREST: bool = True
+K: Dict[str, int] = {}
+SKELETON_EDGES: List[Tuple[int, int]] = []
+HANDS_EDGES: List[Tuple[int, int]] = []
+UDP_IP: str = "127.0.0.1"
+UDP_PORT: int = 7777
+HEADER_V2_FMT: str = "<4sBBHHQ"
+MAGIC: bytes = b"POSE"
+VERSION: int = 2
+HAND_HEAD_FMT: str = "<HBf"
+
+def _utils_not_loaded(*_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - safety fallback
+    raise RuntimeError("Runtime utilities are not loaded yet")
+
+fourcc_to_str = _utils_not_loaded  # type: ignore[assignment]
+kps_to_bbox = _utils_not_loaded  # type: ignore[assignment]
+make_letterbox_affine = _utils_not_loaded  # type: ignore[assignment]
+apply_affine_xy = _utils_not_loaded  # type: ignore[assignment]
+bbox_apply_affine = _utils_not_loaded  # type: ignore[assignment]
+person_center = _utils_not_loaded  # type: ignore[assignment]
+clip_int = _utils_not_loaded  # type: ignore[assignment]
+draw_pose = _utils_not_loaded  # type: ignore[assignment]
+draw_hands = _utils_not_loaded  # type: ignore[assignment]
+make_bbox_mask = _utils_not_loaded  # type: ignore[assignment]
+warp_mask_to_canvas = _utils_not_loaded  # type: ignore[assignment]
+cutout_alpha_inplace = _utils_not_loaded  # type: ignore[assignment]
+padded_bbox_src = _utils_not_loaded  # type: ignore[assignment]
+ema_rect = _utils_not_loaded  # type: ignore[assignment]
+crop_safe = _utils_not_loaded  # type: ignore[assignment]
+
+_utils_loaded = False
+
+
+def ensure_utils_loaded() -> None:
+    global _utils_loaded, ONLY_NEAREST, K, SKELETON_EDGES, HANDS_EDGES
+    global UDP_IP, UDP_PORT, HEADER_V2_FMT, MAGIC, VERSION, HAND_HEAD_FMT
+    global fourcc_to_str, kps_to_bbox, make_letterbox_affine, apply_affine_xy
+    global bbox_apply_affine, person_center, clip_int, draw_pose, draw_hands
+    global make_bbox_mask, warp_mask_to_canvas, cutout_alpha_inplace
+    global padded_bbox_src, ema_rect, crop_safe
+
+    if _utils_loaded:
+        return
+
+    utils = importlib.import_module("utils")
+    ONLY_NEAREST = getattr(utils, "ONLY_NEAREST")
+    K = getattr(utils, "K")
+    SKELETON_EDGES = getattr(utils, "SKELETON_EDGES")
+    HANDS_EDGES = getattr(utils, "HANDS_EDGES")
+    UDP_IP = getattr(utils, "UDP_IP")
+    UDP_PORT = getattr(utils, "UDP_PORT")
+    HEADER_V2_FMT = getattr(utils, "HEADER_V2_FMT")
+    MAGIC = getattr(utils, "MAGIC")
+    VERSION = getattr(utils, "VERSION")
+    HAND_HEAD_FMT = getattr(utils, "HAND_HEAD_FMT")
+    fourcc_to_str = getattr(utils, "fourcc_to_str")
+    kps_to_bbox = getattr(utils, "kps_to_bbox")
+    make_letterbox_affine = getattr(utils, "make_letterbox_affine")
+    apply_affine_xy = getattr(utils, "apply_affine_xy")
+    bbox_apply_affine = getattr(utils, "bbox_apply_affine")
+    person_center = getattr(utils, "person_center")
+    clip_int = getattr(utils, "clip_int")
+    draw_pose = getattr(utils, "draw_pose")
+    draw_hands = getattr(utils, "draw_hands")
+    make_bbox_mask = getattr(utils, "make_bbox_mask")
+    warp_mask_to_canvas = getattr(utils, "warp_mask_to_canvas")
+    cutout_alpha_inplace = getattr(utils, "cutout_alpha_inplace")
+    padded_bbox_src = getattr(utils, "padded_bbox_src")
+    ema_rect = getattr(utils, "ema_rect")
+    crop_safe = getattr(utils, "crop_safe")
+
+    globals()["np"] = globals()["np"] or getattr(utils, "np")  # share numpy instance
+    globals()["cv2"] = globals()["cv2"] or getattr(utils, "cv2")
+
+    _utils_loaded = True
+
+
+from ui.gui_startup import (
+    SettingsForm,
+    defaults_from_schema,
+    get_args_with_gui_fallback,
+    namespace_from_dict,
 )
 
 # =========================
-# Components
+# Components (lazy loaded)
 # =========================
 
-from pose_components import (
-    CameraCapture, CenterTracker, UDPPoseSender, NDISender,
-    RVM, PoseDetector, HandsDetector,
-    compute_bg_stats, build_gamma_dark_lut,
-)
+CameraCapture = None  # type: ignore[assignment]
+CenterTracker = None  # type: ignore[assignment]
+UDPPoseSender = None  # type: ignore[assignment]
+NDISender = None  # type: ignore[assignment]
+RVM = None  # type: ignore[assignment]
+PoseDetector = None  # type: ignore[assignment]
+HandsDetector = None  # type: ignore[assignment]
+compute_bg_stats = _utils_not_loaded  # type: ignore[assignment]
+build_gamma_dark_lut = _utils_not_loaded  # type: ignore[assignment]
+
+_components_loaded = False
+
+
+def ensure_components_loaded() -> None:
+    global _components_loaded
+    global CameraCapture, CenterTracker, UDPPoseSender, NDISender
+    global RVM, PoseDetector, HandsDetector, compute_bg_stats, build_gamma_dark_lut
+
+    if _components_loaded:
+        return
+
+    mod = importlib.import_module("pose_components")
+    CameraCapture = getattr(mod, "CameraCapture")
+    CenterTracker = getattr(mod, "CenterTracker")
+    UDPPoseSender = getattr(mod, "UDPPoseSender")
+    NDISender = getattr(mod, "NDISender")
+    RVM = getattr(mod, "RVM")
+    PoseDetector = getattr(mod, "PoseDetector")
+    HandsDetector = getattr(mod, "HandsDetector")
+    compute_bg_stats = getattr(mod, "compute_bg_stats")
+    build_gamma_dark_lut = getattr(mod, "build_gamma_dark_lut")
+
+    _components_loaded = True
 
 # =========================
 # Argument Parsing (GUI fallback)
@@ -185,7 +324,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--roi-pad-y", type=float, default=0.15, help="Hands ROI pad ratio Y")
 
     # 핵심: GUI fallback 호출
-    from ui.gui_startup import get_args_with_gui_fallback
     return get_args_with_gui_fallback(ap)
 
 # =========================
@@ -214,6 +352,7 @@ class RunContext:
     # grading
     stats: Optional[Dict]
     lut_gamma_dark: Optional[np.ndarray]
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 @dataclass
 class Caches:
@@ -314,7 +453,11 @@ def prepare_grading(args: argparse.Namespace, OUT_W: int, OUT_H: int) -> Tuple[O
     lut = build_gamma_dark_lut(stats["gamma"], stats["dark"])
     return stats, lut
 
-def build_context(args: argparse.Namespace) -> RunContext:
+def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
+    ensure_runtime_modules()
+    ensure_utils_loaded()
+    ensure_components_loaded()
+
     W, H = args.w, args.h
     KP_THR = float(np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or ONLY_NEAREST
@@ -337,7 +480,8 @@ def build_context(args: argparse.Namespace) -> RunContext:
     return RunContext(
         args=args, OUT_W=OUT_W, OUT_H=OUT_H, KP_THR=KP_THR, use_nearest=use_nearest,
         cap=cap, cam_mgr=cam_mgr, center=center, device=device, pose=pose, rvm=rvm,
-        hands=hands, sender=sender, udp=udp, stats=stats, lut_gamma_dark=lut
+        hands=hands, sender=sender, udp=udp, stats=stats, lut_gamma_dark=lut,
+        stop_event=stop_event or threading.Event()
     )
 
 # =========================
@@ -627,11 +771,16 @@ def run_loop(ctx: RunContext) -> None:
 
     print("[INFO] Running... (ESC to quit)")
     try:
-        while True:
+        while not ctx.stop_event.is_set():
             prof.tick()  # 프레임 시작
+
+            if ctx.stop_event.is_set():
+                break
 
             frame_bgr = ctx.cam_mgr.read()
             if frame_bgr is None:
+                if ctx.stop_event.is_set():
+                    break
                 if not ctx.args.no_preview:
                     if (cv2.waitKey(1) & 0xFF) == 27:
                         break
@@ -704,6 +853,9 @@ def run_loop(ctx: RunContext) -> None:
             prof.mark("io")
 
             # 10) Preview
+            if ctx.stop_event.is_set():
+                break
+
             if show_preview(ctx, frame_rgba, xy_send, conf_send, bbox_canvas):
                 break
             prof.mark("preview")
@@ -718,6 +870,7 @@ def run_loop(ctx: RunContext) -> None:
 
 
 def cleanup(ctx: RunContext) -> None:
+    ctx.stop_event.set()
     ctx.cam_mgr.stop()
     ctx.cap.release()
     if not ctx.args.no_preview:
@@ -727,14 +880,225 @@ def cleanup(ctx: RunContext) -> None:
     ctx.hands.close()
     print("[INFO] Finished.")
 
+
+class PipelineRunner:
+    """Background thread runner for the capture/render pipeline."""
+
+    def __init__(self, app: "ControlPanelApp") -> None:
+        self.app = app
+        self.thread: Optional[threading.Thread] = None
+        self.ctx: Optional[RunContext] = None
+        self.stop_event: Optional[threading.Event] = None
+        self._lock = threading.Lock()
+
+    def start(self, args: argparse.Namespace) -> None:
+        with self._lock:
+            if self.thread and self.thread.is_alive():
+                raise RuntimeError("Pipeline already running")
+            stop_event = threading.Event()
+            self.stop_event = stop_event
+
+            def worker() -> None:
+                ctx: Optional[RunContext] = None
+                try:
+                    ctx = build_context(args, stop_event=stop_event)
+                    with self._lock:
+                        self.ctx = ctx
+                    self.app.on_pipeline_running_threadsafe()
+                    run_loop(ctx)
+                except Exception as exc:  # pragma: no cover - runtime failure path
+                    self.app.on_pipeline_error_threadsafe(exc)
+                finally:
+                    if ctx is not None:
+                        try:
+                            cleanup(ctx)
+                        except Exception as exc:  # pragma: no cover - cleanup failure
+                            print("[ERROR] Cleanup failed:", exc, file=sys.stderr)
+                    self.app.on_pipeline_finished_threadsafe()
+                    with self._lock:
+                        self.thread = None
+                        self.ctx = None
+                        self.stop_event = None
+
+            thread = threading.Thread(target=worker, name="pipeline-thread", daemon=True)
+            self.thread = thread
+
+        thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            event = self.stop_event
+            ctx = self.ctx
+        if event:
+            event.set()
+        if ctx:
+            ctx.cam_mgr.stop()
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self.thread and self.thread.is_alive())
+
+
+class ControlPanelApp:
+    def __init__(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, ttk
+        except Exception as exc:  # pragma: no cover - environment without Tk
+            raise RuntimeError("Tkinter GUI is not available") from exc
+
+        self.messagebox = messagebox
+
+        self.root = tk.Tk()
+        self.root.title("WebcamCutout — Controller")
+        self.root.geometry("960x760")
+
+        defaults = defaults_from_schema()
+        self.form = SettingsForm(self.root, defaults)
+        self.form.focus_first()
+
+        controls = ttk.Frame(self.root)
+        controls.pack(fill="x", padx=8, pady=8)
+
+        self.status_var = tk.StringVar(value="Idle")
+        ttk.Label(controls, textvariable=self.status_var).pack(side="left")
+
+        self.stop_btn = ttk.Button(controls, text="Stop", command=self.on_stop, state="disabled")
+        self.stop_btn.pack(side="right")
+        self.start_btn = ttk.Button(controls, text="Start", command=self.on_start)
+        self.start_btn.pack(side="right", padx=6)
+
+        self.runner = PipelineRunner(self)
+        self._requested_stop = False
+        self._error_reported = False
+        self._closing = False
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    # ------------------------------------------------------------------
+    # UI callbacks
+    # ------------------------------------------------------------------
+    def on_start(self) -> None:
+        if self.runner.is_running():
+            self.messagebox.showinfo("Info", "Pipeline is already running.")
+            return
+        try:
+            values = self.form.collect_values()
+        except Exception as exc:
+            self.messagebox.showerror("Invalid input", str(exc))
+            return
+
+        args = namespace_from_dict(values)
+
+        self._requested_stop = False
+        self._error_reported = False
+        self.form.set_running(True)
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.queue_status("Initializing…")
+        try:
+            self.runner.start(args)
+        except RuntimeError as exc:
+            self._error_reported = True
+            self.queue_status("Error")
+            self.messagebox.showerror("Error", str(exc))
+            self._reset_controls()
+
+    def on_stop(self) -> None:
+        if not self.runner.is_running():
+            return
+        self._requested_stop = True
+        self.queue_status("Stopping…")
+        self.stop_btn.configure(state="disabled")
+        self.runner.stop()
+
+    def on_close(self) -> None:
+        if self.runner.is_running():
+            self._closing = True
+            if not self._requested_stop:
+                self.on_stop()
+            self.root.after(200, self._wait_close)
+            return
+        self.root.destroy()
+
+    def _wait_close(self) -> None:
+        if self.runner.is_running():
+            self.root.after(200, self._wait_close)
+        else:
+            self.root.destroy()
+
+    # ------------------------------------------------------------------
+    # Thread-safe notifications from PipelineRunner
+    # ------------------------------------------------------------------
+    def queue_status(self, text: str) -> None:
+        self.root.after(0, lambda: self.status_var.set(text))
+
+    def on_pipeline_running_threadsafe(self) -> None:
+        self.root.after(0, lambda: self.queue_status("Running"))
+
+    def on_pipeline_error_threadsafe(self, exc: Exception) -> None:
+        tb = ''.join(traceback.format_exception(exc.__class__, exc, exc.__traceback__))
+
+        def show_error() -> None:
+            self._error_reported = True
+            self.queue_status("Error")
+            print(tb, file=sys.stderr)
+            self.messagebox.showerror("Pipeline error", str(exc))
+
+        self.root.after(0, show_error)
+
+    def on_pipeline_finished_threadsafe(self) -> None:
+        self.root.after(0, self._on_pipeline_finished)
+
+    def _on_pipeline_finished(self) -> None:
+        self._reset_controls()
+        if self._error_reported:
+            pass
+        elif self._requested_stop:
+            self.queue_status("Stopped")
+        else:
+            self.queue_status("Idle")
+        self._requested_stop = False
+        if self._closing:
+            self.root.after(50, self.root.destroy)
+
+    def _reset_controls(self) -> None:
+        self.form.set_running(False)
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+
+
 # =========================
 # Public entry
 # =========================
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    stop_event = threading.Event()
+    ctx = build_context(args, stop_event=stop_event)
+    try:
+        run_loop(ctx)
+    finally:
+        cleanup(ctx)
+
+
 def main() -> None:
-    args = parse_args()
-    ctx = build_context(args)
-    run_loop(ctx)
-    cleanup(ctx)
+    if len(sys.argv) > 1:
+        args = parse_args()
+        run_pipeline(args)
+        return
+
+    try:
+        app = ControlPanelApp()
+    except RuntimeError as exc:
+        print(f"[WARN] {exc}. Falling back to CLI mode.", file=sys.stderr)
+        args = parse_args()
+        run_pipeline(args)
+        return
+
+    app.run()
 
 
 if __name__ == "__main__":
