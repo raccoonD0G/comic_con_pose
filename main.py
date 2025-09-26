@@ -16,6 +16,8 @@ Author: refactor+opt by ChatGPT
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import socket
 import struct
 import sys
@@ -24,19 +26,63 @@ import traceback
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
-
-import cv2
-import numpy as np
-import torch
-
-import NDIlib as ndi
-import mediapipe as mp
-from ultralytics import YOLO
-
-import os
 
 from time import perf_counter
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    import cv2  # noqa: F401
+    import numpy as np  # noqa: F401
+    import torch  # noqa: F401
+    import NDIlib as ndi  # noqa: F401
+    import mediapipe as mp  # noqa: F401
+    from ultralytics import YOLO  # noqa: F401
+
+
+# Heavy runtime modules (cv2/torch/etc.) are imported lazily so the GUI can
+# appear instantly even in a PyInstaller build. They will be populated the
+# first time `ensure_runtime_modules()` is called inside `build_context()`.
+cv2 = None  # type: ignore[assignment]
+np = None  # type: ignore[assignment]
+torch = None  # type: ignore[assignment]
+ndi = None  # type: ignore[assignment]
+mp = None  # type: ignore[assignment]
+YOLO = None  # type: ignore[assignment]
+
+_runtime_modules_loaded = False
+
+
+def ensure_runtime_modules() -> None:
+    """Import heavy runtime dependencies on demand."""
+
+    global _runtime_modules_loaded, cv2, np, torch, ndi, mp, YOLO
+
+    if _runtime_modules_loaded:
+        return
+
+    if np is None:
+        globals()["np"] = importlib.import_module("numpy")
+    if cv2 is None:
+        globals()["cv2"] = importlib.import_module("cv2")
+    if torch is None:
+        globals()["torch"] = importlib.import_module("torch")
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("medium")
+            except Exception:
+                pass
+    if ndi is None:
+        globals()["ndi"] = importlib.import_module("NDIlib")
+    if mp is None:
+        try:
+            globals()["mp"] = importlib.import_module("mediapipe")
+        except Exception:
+            globals()["mp"] = None
+    if YOLO is None:
+        globals()["YOLO"] = importlib.import_module("ultralytics").YOLO
+
+    _runtime_modules_loaded = True
 
 class Profiler:
     __slots__ = ("t0","marks","frame_ms_ema","fps_ema","enabled")
@@ -72,17 +118,6 @@ class Profiler:
             print(f"[PROF] frame={frame_idx} total={total_ms:.1f}ms | {parts} | ema={self.frame_ms_ema:.1f}ms | fps≈{self.fps_ema:.1f}")
             self.marks.clear()
 
-# ---------------------------
-# Runtime perf hints (CUDA)
-# ---------------------------
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-    try:
-        torch.set_float32_matmul_precision("medium")
-    except Exception:
-        pass
-
-
 def resource_path(relative_path):
     """ PyInstaller 실행 또는 개발 환경에서 리소스 파일 경로 얻기 """
     if hasattr(sys, '_MEIPASS'):
@@ -92,15 +127,91 @@ def resource_path(relative_path):
 
 
 # =========================
-# Utils
+# Utils (lazy loaded)
 # =========================
 
-from utils import (
-    ONLY_NEAREST, K, SKELETON_EDGES, HANDS_EDGES,
-    UDP_IP, UDP_PORT, HEADER_V2_FMT, MAGIC, VERSION, HAND_HEAD_FMT,
-    fourcc_to_str, kps_to_bbox, make_letterbox_affine, apply_affine_xy,
-    bbox_apply_affine, person_center, clip_int,
-    draw_pose, draw_hands, make_bbox_mask, warp_mask_to_canvas, cutout_alpha_inplace, padded_bbox_src, ema_rect, crop_safe, padded_bbox_src
+ONLY_NEAREST: bool = True
+K: Dict[str, int] = {}
+SKELETON_EDGES: List[Tuple[int, int]] = []
+HANDS_EDGES: List[Tuple[int, int]] = []
+UDP_IP: str = "127.0.0.1"
+UDP_PORT: int = 7777
+HEADER_V2_FMT: str = "<4sBBHHQ"
+MAGIC: bytes = b"POSE"
+VERSION: int = 2
+HAND_HEAD_FMT: str = "<HBf"
+
+def _utils_not_loaded(*_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - safety fallback
+    raise RuntimeError("Runtime utilities are not loaded yet")
+
+fourcc_to_str = _utils_not_loaded  # type: ignore[assignment]
+kps_to_bbox = _utils_not_loaded  # type: ignore[assignment]
+make_letterbox_affine = _utils_not_loaded  # type: ignore[assignment]
+apply_affine_xy = _utils_not_loaded  # type: ignore[assignment]
+bbox_apply_affine = _utils_not_loaded  # type: ignore[assignment]
+person_center = _utils_not_loaded  # type: ignore[assignment]
+clip_int = _utils_not_loaded  # type: ignore[assignment]
+draw_pose = _utils_not_loaded  # type: ignore[assignment]
+draw_hands = _utils_not_loaded  # type: ignore[assignment]
+make_bbox_mask = _utils_not_loaded  # type: ignore[assignment]
+warp_mask_to_canvas = _utils_not_loaded  # type: ignore[assignment]
+cutout_alpha_inplace = _utils_not_loaded  # type: ignore[assignment]
+padded_bbox_src = _utils_not_loaded  # type: ignore[assignment]
+ema_rect = _utils_not_loaded  # type: ignore[assignment]
+crop_safe = _utils_not_loaded  # type: ignore[assignment]
+
+_utils_loaded = False
+
+
+def ensure_utils_loaded() -> None:
+    global _utils_loaded, ONLY_NEAREST, K, SKELETON_EDGES, HANDS_EDGES
+    global UDP_IP, UDP_PORT, HEADER_V2_FMT, MAGIC, VERSION, HAND_HEAD_FMT
+    global fourcc_to_str, kps_to_bbox, make_letterbox_affine, apply_affine_xy
+    global bbox_apply_affine, person_center, clip_int, draw_pose, draw_hands
+    global make_bbox_mask, warp_mask_to_canvas, cutout_alpha_inplace
+    global padded_bbox_src, ema_rect, crop_safe
+
+    if _utils_loaded:
+        return
+
+    utils = importlib.import_module("utils")
+    ONLY_NEAREST = getattr(utils, "ONLY_NEAREST")
+    K = getattr(utils, "K")
+    SKELETON_EDGES = getattr(utils, "SKELETON_EDGES")
+    HANDS_EDGES = getattr(utils, "HANDS_EDGES")
+    UDP_IP = getattr(utils, "UDP_IP")
+    UDP_PORT = getattr(utils, "UDP_PORT")
+    HEADER_V2_FMT = getattr(utils, "HEADER_V2_FMT")
+    MAGIC = getattr(utils, "MAGIC")
+    VERSION = getattr(utils, "VERSION")
+    HAND_HEAD_FMT = getattr(utils, "HAND_HEAD_FMT")
+    fourcc_to_str = getattr(utils, "fourcc_to_str")
+    kps_to_bbox = getattr(utils, "kps_to_bbox")
+    make_letterbox_affine = getattr(utils, "make_letterbox_affine")
+    apply_affine_xy = getattr(utils, "apply_affine_xy")
+    bbox_apply_affine = getattr(utils, "bbox_apply_affine")
+    person_center = getattr(utils, "person_center")
+    clip_int = getattr(utils, "clip_int")
+    draw_pose = getattr(utils, "draw_pose")
+    draw_hands = getattr(utils, "draw_hands")
+    make_bbox_mask = getattr(utils, "make_bbox_mask")
+    warp_mask_to_canvas = getattr(utils, "warp_mask_to_canvas")
+    cutout_alpha_inplace = getattr(utils, "cutout_alpha_inplace")
+    padded_bbox_src = getattr(utils, "padded_bbox_src")
+    ema_rect = getattr(utils, "ema_rect")
+    crop_safe = getattr(utils, "crop_safe")
+
+    globals()["np"] = globals()["np"] or getattr(utils, "np")  # share numpy instance
+    globals()["cv2"] = globals()["cv2"] or getattr(utils, "cv2")
+
+    _utils_loaded = True
+
+
+from ui.gui_startup import (
+    SettingsForm,
+    defaults_from_schema,
+    get_args_with_gui_fallback,
+    namespace_from_dict,
 )
 from ui.gui_startup import (
     SettingsForm,
@@ -110,14 +221,42 @@ from ui.gui_startup import (
 )
 
 # =========================
-# Components
+# Components (lazy loaded)
 # =========================
 
-from pose_components import (
-    CameraCapture, CenterTracker, UDPPoseSender, NDISender,
-    RVM, PoseDetector, HandsDetector,
-    compute_bg_stats, build_gamma_dark_lut,
-)
+CameraCapture = None  # type: ignore[assignment]
+CenterTracker = None  # type: ignore[assignment]
+UDPPoseSender = None  # type: ignore[assignment]
+NDISender = None  # type: ignore[assignment]
+RVM = None  # type: ignore[assignment]
+PoseDetector = None  # type: ignore[assignment]
+HandsDetector = None  # type: ignore[assignment]
+compute_bg_stats = _utils_not_loaded  # type: ignore[assignment]
+build_gamma_dark_lut = _utils_not_loaded  # type: ignore[assignment]
+
+_components_loaded = False
+
+
+def ensure_components_loaded() -> None:
+    global _components_loaded
+    global CameraCapture, CenterTracker, UDPPoseSender, NDISender
+    global RVM, PoseDetector, HandsDetector, compute_bg_stats, build_gamma_dark_lut
+
+    if _components_loaded:
+        return
+
+    mod = importlib.import_module("pose_components")
+    CameraCapture = getattr(mod, "CameraCapture")
+    CenterTracker = getattr(mod, "CenterTracker")
+    UDPPoseSender = getattr(mod, "UDPPoseSender")
+    NDISender = getattr(mod, "NDISender")
+    RVM = getattr(mod, "RVM")
+    PoseDetector = getattr(mod, "PoseDetector")
+    HandsDetector = getattr(mod, "HandsDetector")
+    compute_bg_stats = getattr(mod, "compute_bg_stats")
+    build_gamma_dark_lut = getattr(mod, "build_gamma_dark_lut")
+
+    _components_loaded = True
 
 # =========================
 # Argument Parsing (GUI fallback)
@@ -322,6 +461,10 @@ def prepare_grading(args: argparse.Namespace, OUT_W: int, OUT_H: int) -> Tuple[O
     return stats, lut
 
 def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
+    ensure_runtime_modules()
+    ensure_utils_loaded()
+    ensure_components_loaded()
+
     W, H = args.w, args.h
     KP_THR = float(np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or ONLY_NEAREST
