@@ -83,7 +83,11 @@ def run_loop(ctx: RunContext) -> None:
     try:
         while not ctx.stop_event.is_set():
             prof.tick()
-            ok, frame_bgr = ctx.cam_mgr.read()
+            frame_read = ctx.cam_mgr.read()
+            if isinstance(frame_read, tuple):
+                ok, frame_bgr = frame_read
+            else:
+                ok, frame_bgr = frame_read is not None, frame_read
             if not ok or frame_bgr is None:
                 time.sleep(0.005)
                 continue
