@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from runtime import Profiler
 from runtime import lazy_modules as lazy
@@ -37,30 +37,57 @@ from .setup import (
 )
 
 
-def build_context(args: argparse.Namespace, stop_event: Optional[threading.Event] = None) -> RunContext:
+ProgressCallback = Callable[[str], None]
+
+
+def _notify_progress(progress: Optional[ProgressCallback], message: str) -> None:
+    if progress is None:
+        return
+    try:
+        progress(message)
+    except Exception:
+        pass
+
+
+def build_context(
+    args: argparse.Namespace,
+    stop_event: Optional[threading.Event] = None,
+    progress: Optional[ProgressCallback] = None,
+) -> RunContext:
     width, height = args.w, args.h
     kp_thr = float(lazy.np.clip(args.kp_thr, 0.0, 1.0))
     use_nearest = args.nearest_only or lazy.ONLY_NEAREST
 
+    _notify_progress(progress, "Initializing NDI runtime…")
     init_ndi_or_exit()
+    _notify_progress(progress, "Opening capture source…")
     cap = open_capture(args, width, height)
     cam_w, cam_h = probe_source_size_or_exit(cap)
 
     out_w, out_h = (cam_w, cam_h) if args.ndi_follow_camera else (width, height)
     center = lazy.CenterTracker(out_w, out_h, args.center_smooth, args.center_deadzone)
 
+    _notify_progress(progress, "Loading neural models (pose/hands/matting)…")
     device, pose, rvm, hands = build_models(args)
+    if getattr(device, "type", None) == "cuda":
+        _notify_progress(progress, "Warming up CUDA kernels…")
     warmup_cuda_kernels(args, device, pose, rvm, cam_w, cam_h)
+    _notify_progress(progress, "Starting pose worker…")
     pose_worker = PoseWorker(pose, scale=float(args.pose_scale))
     pose_worker.start()
+    _notify_progress(progress, "Creating NDI sender…")
     sender = build_sender_or_exit(args, out_w, out_h)
+    _notify_progress(progress, "Preparing preview window…")
     prepare_preview(args, out_w, out_h)
 
+    _notify_progress(progress, "Starting camera capture…")
     cam_mgr = lazy.CameraCapture(args, cap)
     cam_mgr.start()
+    _notify_progress(progress, "Preparing UDP output and grading…")
     udp = lazy.UDPPoseSender(lazy.UDP_IP, lazy.UDP_PORT)
     stats, lut = prepare_grading(args, out_w, out_h)
 
+    _notify_progress(progress, "Initialization complete")
     return RunContext(
         args=args,
         OUT_W=out_w,
@@ -174,7 +201,7 @@ def cleanup(ctx: RunContext) -> None:
 
 def run_pipeline(args: argparse.Namespace) -> None:
     stop_event = threading.Event()
-    ctx = build_context(args, stop_event=stop_event)
+    ctx = build_context(args, stop_event=stop_event, progress=lambda msg: print(f"[INFO] {msg}"))
     try:
         run_loop(ctx)
     finally:

@@ -27,7 +27,11 @@ class PipelineRunner:
             def worker() -> None:
                 ctx = None
                 try:
-                    ctx = build_context(args, stop_event=stop_event)
+                    ctx = build_context(
+                        args,
+                        stop_event=stop_event,
+                        progress=self.app.queue_status,
+                    )
                     with self._lock:
                         self.ctx = ctx
                     self.app.on_pipeline_running_threadsafe()
